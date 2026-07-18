@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.Tvoice" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/tvoice_blue</item>
+        <item name="colorSecondary">@color/tvoice_cyan</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:navigationBarColor">#FFFFFF</item>
+        <item name="android:statusBarColor">#FFFFFF</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>
