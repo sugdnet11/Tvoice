@@ -64,4 +64,13 @@ class TvoiceProtocolTest {
         )
         assertEquals(ViaMapping("203.0.113.17", 62001), mapping)
     }
+
+    @Test
+    fun authenticationChallengeDoesNotEstablishDialog() {
+        assertTrue(responseEstablishesDialog(180))
+        assertTrue(responseEstablishesDialog(200))
+        assertTrue(!responseEstablishesDialog(401))
+        assertTrue(!responseEstablishesDialog(407))
+        assertTrue(!responseEstablishesDialog(481))
+    }
 }

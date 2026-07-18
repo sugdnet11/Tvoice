@@ -19,6 +19,9 @@ import android.widget.TextView
 class IncomingCallActivity : Activity(), SipManager.Observer {
     private var remote = "Неизвестный"
     private val blue = Color.rgb(26, 76, 221)
+    private val dark = Color.rgb(10, 33, 74)
+    private val muted = Color.rgb(100, 116, 139)
+    private val incomingPage = Color.rgb(239, 245, 255)
     private val green = Color.rgb(34, 197, 94)
     private val red = Color.rgb(239, 68, 68)
 
@@ -38,6 +41,14 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
         TvoiceRuntime.initialize(this)
         TvoiceRuntime.addObserver(this)
         handleIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        startService(
+            Intent(this, TvoiceCallService::class.java)
+                .setAction(TvoiceCallService.ACTION_INCOMING_SCREEN_VISIBLE)
+        )
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -62,28 +73,35 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(dp(28), dp(58), dp(28), dp(42))
-            setBackgroundColor(blue)
+            setBackgroundColor(incomingPage)
         }
+        root.addView(TextView(this).apply {
+            text = "Tvoice"
+            textSize = 16f
+            setTextColor(blue)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }, LinearLayout.LayoutParams(-1, -2))
         val avatar = TextView(this).apply {
             text = remote.take(2)
             textSize = 34f
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = circle(Color.rgb(2, 194, 229))
+            background = circle(blue)
         }
-        root.addView(avatar, LinearLayout.LayoutParams(dp(104), dp(104)))
+        root.addView(avatar, LinearLayout.LayoutParams(dp(104), dp(104)).apply { topMargin = dp(72) })
         root.addView(TextView(this).apply {
             text = remote
             textSize = 38f
-            setTextColor(Color.WHITE)
+            setTextColor(dark)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(28) })
         root.addView(TextView(this).apply {
             text = "Входящий вызов Tvoice"
             textSize = 17f
-            setTextColor(Color.rgb(176, 231, 255))
+            setTextColor(muted)
             gravity = Gravity.CENTER
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
         root.addView(Space(this), LinearLayout.LayoutParams(1, 0, 1f))
@@ -126,7 +144,7 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
             addView(TextView(this@IncomingCallActivity).apply {
                 text = label
                 textSize = 14f
-                setTextColor(Color.WHITE)
+                setTextColor(dark)
                 gravity = Gravity.CENTER
             }, LinearLayout.LayoutParams(-1, dp(36)).apply { topMargin = dp(6) })
         }

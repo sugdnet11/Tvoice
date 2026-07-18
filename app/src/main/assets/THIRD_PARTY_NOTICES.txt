@@ -7,5 +7,4 @@ Material Design Icons — Apache License 2.0
 License: https://www.apache.org/licenses/LICENSE-2.0
 
 No Linphone, Liblinphone, PJSIP, Zoiper or MicroSIP binaries or source code
-are included in Tvoice 0.4.
-
+are included in Tvoice 0.6.

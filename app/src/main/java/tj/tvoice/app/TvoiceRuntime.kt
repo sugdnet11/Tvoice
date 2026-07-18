@@ -24,6 +24,8 @@ object TvoiceRuntime : SipManager.Observer {
         private set
     @Volatile var callMessage: String = ""
         private set
+    @Volatile var isMainUiVisible: Boolean = false
+        private set
 
     @Synchronized
     fun initialize(context: Context) {
@@ -38,6 +40,10 @@ object TvoiceRuntime : SipManager.Observer {
 
     fun removeObserver(observer: SipManager.Observer) {
         observers -= observer
+    }
+
+    fun setMainUiVisible(visible: Boolean) {
+        isMainUiVisible = visible
     }
 
     @Synchronized

@@ -245,7 +245,7 @@ internal class TvoiceSipCore(
             "CSeq: $registrationCseq REGISTER",
             "Contact: <${contactUri()}>;ob;expires=$expires",
             "Expires: $expires",
-            "User-Agent: Tvoice/0.5 TvoiceSipCore/1.1",
+            "User-Agent: Tvoice/0.6 TvoiceSipCore/1.2",
             "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE",
             "Supported: path, gruu, outbound"
         )
@@ -278,7 +278,7 @@ internal class TvoiceSipCore(
             "Contact: <${contactUri()}>",
             "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE",
             "Supported: replaces, timer",
-            "User-Agent: Tvoice/0.5 TvoiceSipCore/1.1"
+            "User-Agent: Tvoice/0.6 TvoiceSipCore/1.2"
         )
         call.routeSet.forEach { headers += "Route: $it" }
         call.authChallenge?.let { challenge ->
@@ -299,7 +299,7 @@ internal class TvoiceSipCore(
             "To: <sip:${call.remoteUser}@${SipConfig.DOMAIN}>${call.remoteTag?.let { ";tag=$it" }.orEmpty()}",
             "Call-ID: ${call.callId}",
             "CSeq: ${call.localCseq} CANCEL",
-            "User-Agent: Tvoice/0.5 TvoiceSipCore/1.1"
+            "User-Agent: Tvoice/0.6 TvoiceSipCore/1.2"
         )
         sendRequest("CANCEL $uri SIP/2.0", headers, "", call.peer)
     }
@@ -314,7 +314,7 @@ internal class TvoiceSipCore(
             "To: ${response.header("To") ?: "<sip:${call.remoteUser}@${SipConfig.DOMAIN}>"}",
             "Call-ID: ${call.callId}",
             "CSeq: ${response.cseqNumber() ?: call.localCseq} ACK",
-            "User-Agent: Tvoice/0.5 TvoiceSipCore/1.1"
+            "User-Agent: Tvoice/0.6 TvoiceSipCore/1.2"
         )
         if (!non2xx) call.routeSet.forEach { headers += "Route: $it" }
         sendRequest("ACK $uri SIP/2.0", headers, "", call.peer)
@@ -330,7 +330,7 @@ internal class TvoiceSipCore(
             "Call-ID: ${call.callId}",
             "CSeq: ${call.localCseq} $method",
             "Contact: <${contactUri()}>",
-            "User-Agent: Tvoice/0.5 TvoiceSipCore/1.1"
+            "User-Agent: Tvoice/0.6 TvoiceSipCore/1.2"
         )
         call.routeSet.forEach { headers += "Route: $it" }
         if (contentType != null) headers += "Content-Type: $contentType"
@@ -421,12 +421,17 @@ internal class TvoiceSipCore(
         val call = dialog ?: return
         if (message.header("Call-ID") != call.callId) return
         call.peer = source
-        call.remoteTag = headerTag(message.header("To")) ?: call.remoteTag
+        if (responseEstablishesDialog(status)) {
+            call.remoteTag = headerTag(message.header("To")) ?: call.remoteTag
+        }
         when (status) {
             100, 183 -> listener.onCall(CallState.OutgoingProgress, call.remoteUser, "SIP $status")
             180 -> listener.onCall(CallState.OutgoingRinging, call.remoteUser, "Телефон звонит")
             401, 407 -> {
                 sendAck(call, message, non2xx = true)
+                // A challenge tag belongs only to the failed transaction. Reusing it would turn
+                // the authenticated retry into an in-dialog INVITE and many PBXs answer SIP 481.
+                call.remoteTag = null
                 if (call.authAttempts >= 2) {
                     finishCall(CallState.Error, "Сервер отклонил вызов")
                     return
@@ -620,7 +625,7 @@ internal class TvoiceSipCore(
         request.header("CSeq")?.let { headers += "CSeq: $it" }
         headers += "Contact: <${contactUri()}>"
         headers += "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE"
-        headers += "User-Agent: Tvoice/0.5 TvoiceSipCore/1.1"
+        headers += "User-Agent: Tvoice/0.6 TvoiceSipCore/1.2"
         if (body.isNotEmpty()) headers += "Content-Type: application/sdp"
         sendRequest("SIP/2.0 $code $reason", headers, body, target)
     }

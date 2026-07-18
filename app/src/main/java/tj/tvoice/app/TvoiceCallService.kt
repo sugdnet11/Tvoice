@@ -11,6 +11,8 @@ import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.drawable.Icon
 import android.media.AudioAttributes
+import android.media.Ringtone
+import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
@@ -18,6 +20,8 @@ import android.provider.Settings
 
 /** Keeps SIP/UDP registration alive and exposes calls through Android's native call UI. */
 class TvoiceCallService : Service(), SipManager.Observer {
+    private var manualRingtone: Ringtone? = null
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannels()
@@ -29,6 +33,12 @@ class TvoiceCallService : Service(), SipManager.Observer {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> Unit
+            ACTION_INCOMING_SCREEN_VISIBLE -> {
+                if (TvoiceRuntime.callState == CallState.IncomingReceived) {
+                    notificationManager().cancel(CALL_NOTIFICATION_ID)
+                    startManualRingtone()
+                }
+            }
             ACTION_DECLINE -> TvoiceRuntime.hangup()
             ACTION_HANGUP -> TvoiceRuntime.hangup()
             ACTION_RESTORE, null -> TvoiceRuntime.restoreSavedAccount()
@@ -39,6 +49,7 @@ class TvoiceCallService : Service(), SipManager.Observer {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        stopManualRingtone()
         TvoiceRuntime.removeObserver(this)
         super.onDestroy()
     }
@@ -56,9 +67,21 @@ class TvoiceCallService : Service(), SipManager.Observer {
 
     override fun onCall(state: CallState, remote: String, message: String) {
         when (state) {
-            CallState.IncomingReceived -> showIncomingCall(remote)
-            CallState.Connected, CallState.StreamsRunning, CallState.Paused -> showOngoingCall(remote, message)
+            CallState.IncomingReceived -> {
+                if (TvoiceRuntime.isMainUiVisible) {
+                    notificationManager().cancel(CALL_NOTIFICATION_ID)
+                    startManualRingtone()
+                } else {
+                    stopManualRingtone()
+                    showIncomingCall(remote)
+                }
+            }
+            CallState.Connected, CallState.StreamsRunning, CallState.Paused -> {
+                stopManualRingtone()
+                showOngoingCall(remote, message)
+            }
             CallState.End, CallState.Error, CallState.Released -> {
+                stopManualRingtone()
                 notificationManager().cancel(CALL_NOTIFICATION_ID)
                 updateServiceNotification("${TvoiceRuntime.activeUsername} • в сети")
             }
@@ -131,6 +154,27 @@ class TvoiceCallService : Service(), SipManager.Observer {
             builder.addAction(Notification.Action.Builder(R.drawable.ic_call, "Ответить", answer).build())
         }
         notificationManager().notify(CALL_NOTIFICATION_ID, builder.build())
+    }
+
+    private fun startManualRingtone() {
+        if (manualRingtone?.isPlaying == true) return
+        val ringtone = runCatching {
+            RingtoneManager.getRingtone(
+                this,
+                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            )
+        }.getOrNull() ?: return
+        ringtone.audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+            .build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) ringtone.isLooping = true
+        manualRingtone = ringtone
+        runCatching { ringtone.play() }
+    }
+
+    private fun stopManualRingtone() {
+        manualRingtone?.let { runCatching { it.stop() } }
+        manualRingtone = null
     }
 
     private fun showOngoingCall(remote: String, message: String) {
@@ -214,6 +258,7 @@ class TvoiceCallService : Service(), SipManager.Observer {
     companion object {
         const val ACTION_RESTORE = "tj.tvoice.app.action.RESTORE"
         const val ACTION_START = "tj.tvoice.app.action.START"
+        const val ACTION_INCOMING_SCREEN_VISIBLE = "tj.tvoice.app.action.INCOMING_SCREEN_VISIBLE"
         const val ACTION_DECLINE = "tj.tvoice.app.action.DECLINE"
         const val ACTION_HANGUP = "tj.tvoice.app.action.HANGUP"
 

@@ -238,6 +238,9 @@ internal fun headerUri(value: String?): String? {
     return (bracketed.ifEmpty { value.substringBefore(';') }).trim().ifEmpty { null }
 }
 
+/** Only provisional/success responses establish an early or confirmed dialog tag. */
+internal fun responseEstablishesDialog(status: Int): Boolean = status in 101..299
+
 internal data class ViaMapping(val address: String, val port: Int) {
     companion object {
         fun parse(via: String?): ViaMapping? {

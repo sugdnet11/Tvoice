@@ -45,6 +45,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     private val green = Color.rgb(34, 197, 94)
     private val red = Color.rgb(239, 68, 68)
     private val page = Color.rgb(247, 249, 252)
+    private val incomingPage = Color.rgb(239, 245, 255)
     private val line = Color.rgb(224, 230, 239)
     private val muted = Color.rgb(100, 116, 139)
 
@@ -67,7 +68,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     private fun renderRuntimeState() {
         ownNumber = TvoiceRuntime.activeUsername.ifBlank { TvoiceRuntime.savedUsername().orEmpty() }
         when (TvoiceRuntime.callState) {
-            CallState.IncomingReceived -> showCall(TvoiceRuntime.remoteNumber, "Входящий вызов", true)
+            CallState.IncomingReceived -> showIncomingCall(TvoiceRuntime.remoteNumber)
             CallState.OutgoingInit, CallState.OutgoingProgress, CallState.OutgoingRinging ->
                 showCall(TvoiceRuntime.remoteNumber, "Вызов…")
             CallState.Connected, CallState.StreamsRunning -> showCall(TvoiceRuntime.remoteNumber, "Соединено")
@@ -81,6 +82,26 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
                 } else showLogin()
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        TvoiceRuntime.setMainUiVisible(true)
+        when (TvoiceRuntime.callState) {
+            CallState.IncomingReceived,
+            CallState.OutgoingInit,
+            CallState.OutgoingProgress,
+            CallState.OutgoingRinging,
+            CallState.Connected,
+            CallState.StreamsRunning,
+            CallState.Paused -> renderRuntimeState()
+            else -> Unit
+        }
+    }
+
+    override fun onStop() {
+        TvoiceRuntime.setMainUiVisible(false)
+        super.onStop()
     }
 
     private fun createShell(showNavigation: Boolean = true) {
@@ -356,7 +377,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         settingCard(body, "SIP-сервер", "185.177.2.115:5060", "UDP")
         settingCard(body, "Состояние", "Регистрация SIP", "В сети")
         section(body, "Приложение")
-        settingCard(body, "Версия", "Tvoice для Android • Tvoice SIP Core", "0.5.0")
+        settingCard(body, "Версия", "Tvoice для Android • Tvoice SIP Core", "0.6.0")
         primaryButton(body, "Выйти из аккаунта", red, 22) {
             sip.logout()
             stopService(Intent(this, TvoiceCallService::class.java))
@@ -366,7 +387,48 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         }
     }
 
-    private fun showCall(remote: String, state: String, incoming: Boolean = false) {
+    private fun showIncomingCall(remote: String) {
+        createShell(false)
+        val body = screen(false).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            setBackgroundColor(incomingPage)
+            setPadding(dp(28), dp(42), dp(28), dp(36))
+        }
+        sub(body, "Tvoice", 16, blue, 0).apply {
+            gravity = Gravity.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val avatar = TextView(this).apply {
+            text = remote.take(2)
+            textSize = 30f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            background = rounded(blue, dp(48).toFloat())
+        }
+        body.addView(avatar, LinearLayout.LayoutParams(dp(96), dp(96)).apply { topMargin = dp(72) })
+        heading(body, remote, 34, dark, 24).gravity = Gravity.CENTER
+        sub(body, "Входящий звонок", 17, muted, 10).gravity = Gravity.CENTER
+        body.addView(Space(this), LinearLayout.LayoutParams(1, 0, 1f))
+
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        actions.addView(incomingAction(R.drawable.ic_call_end, red, "Отклонить") { sip.hangup() }, LinearLayout.LayoutParams(0, dp(126), 1f))
+        actions.addView(incomingAction(R.drawable.ic_call, green, "Ответить") { sip.accept() }, LinearLayout.LayoutParams(0, dp(126), 1f))
+        body.addView(actions, LinearLayout.LayoutParams(-1, dp(126)))
+        notifyIncomingScreenVisible()
+    }
+
+    private fun notifyIncomingScreenVisible() {
+        startService(
+            Intent(this, TvoiceCallService::class.java)
+                .setAction(TvoiceCallService.ACTION_INCOMING_SCREEN_VISIBLE)
+        )
+    }
+
+    private fun showCall(remote: String, state: String) {
         createShell(false)
         val body = screen(false).apply { gravity = Gravity.CENTER_HORIZONTAL; setBackgroundColor(blue); setPadding(dp(24), dp(42), dp(24), dp(30)) }
         val avatar = TextView(this).apply { text = remote.take(2); textSize = 32f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; typeface = Typeface.DEFAULT_BOLD; background = rounded(cyan, dp(42).toFloat()) }
@@ -385,7 +447,6 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         secondRow.addView(toggleCallControl(R.drawable.ic_pause, R.drawable.ic_play, "Удержание") { sip.toggleHold() }, LinearLayout.LayoutParams(0, dp(98), 1f))
         secondRow.addView(toggleCallControl(R.drawable.ic_group_add, R.drawable.ic_group_add, "Конференция") { showConferenceDialog(); true }, LinearLayout.LayoutParams(0, dp(98), 1f))
         body.addView(secondRow, LinearLayout.LayoutParams(-1, dp(102)))
-        if (incoming) primaryButton(body, "Ответить", green, 20) { sip.accept() }
         val end = iconCircle(R.drawable.ic_call_end, red, Color.WHITE) { sip.hangup() }
         body.addView(end, LinearLayout.LayoutParams(dp(78), dp(78)).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(12) })
     }
@@ -407,11 +468,12 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     }
 
     override fun onCall(state: CallState, remote: String, message: String) = runOnUiThread {
+        if (state == CallState.IncomingReceived) {
+            callHistory.add(0, HistoryItem(remote, "Входящий", now()))
+        }
+        if (!TvoiceRuntime.isMainUiVisible) return@runOnUiThread
         when (state) {
-            CallState.IncomingReceived -> {
-                callHistory.add(0, HistoryItem(remote, "Входящий", now()))
-                showCall(remote, "Входящий вызов", true)
-            }
+            CallState.IncomingReceived -> showIncomingCall(remote)
             CallState.OutgoingInit, CallState.OutgoingProgress, CallState.OutgoingRinging -> showCall(remote, "Вызов…")
             CallState.Connected, CallState.StreamsRunning -> showCall(remote, "Соединено")
             CallState.Paused -> showCall(remote, "Удержание")
@@ -511,6 +573,26 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         }
         addView(image, LinearLayout.LayoutParams(dp(60), dp(60)))
         addView(TextView(this@MainActivity).apply { text = label; textSize = 12f; gravity = Gravity.CENTER; setTextColor(Color.WHITE) }, LinearLayout.LayoutParams(-1, dp(30)))
+    }
+
+    private fun incomingAction(icon: Int, color: Int, label: String, action: () -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER
+        val image = ImageView(this@MainActivity).apply {
+            setImageResource(icon)
+            setColorFilter(Color.WHITE)
+            setPadding(dp(20), dp(20), dp(20), dp(20))
+            background = rounded(color, dp(38).toFloat())
+            elevation = dp(3).toFloat()
+            setOnClickListener { action() }
+        }
+        addView(image, LinearLayout.LayoutParams(dp(76), dp(76)))
+        addView(TextView(this@MainActivity).apply {
+            text = label
+            textSize = 14f
+            setTextColor(dark)
+            gravity = Gravity.CENTER
+        }, LinearLayout.LayoutParams(-1, dp(36)).apply { topMargin = dp(6) })
     }
 
     private fun iconCircle(icon: Int, backgroundColor: Int, iconColor: Int, action: () -> Unit) = ImageView(this).apply {
