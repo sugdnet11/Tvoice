@@ -10,6 +10,7 @@
     <application
         android:allowBackup="false"
         android:icon="@drawable/ic_tvoice"
+        android:roundIcon="@drawable/ic_tvoice"
         android:label="Tvoice"
         android:supportsRtl="true"
         android:theme="@style/Theme.Tvoice"
