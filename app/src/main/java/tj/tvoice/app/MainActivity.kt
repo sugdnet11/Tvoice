@@ -2,14 +2,17 @@ package tj.tvoice.app
 
 import android.Manifest
 import android.app.AlertDialog
+import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Bundle
 import android.net.Uri
 import android.provider.ContactsContract
+import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -22,7 +25,7 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : AppCompatActivity(), SipManager.Observer {
-    private lateinit var sip: SipManager
+    private val sip get() = TvoiceRuntime
     private lateinit var shell: LinearLayout
     private lateinit var content: FrameLayout
     private lateinit var bottomBar: LinearLayout
@@ -49,9 +52,35 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        sip = SipManager(this, this)
+        TvoiceRuntime.initialize(this)
+        TvoiceRuntime.addObserver(this)
         profileUri = getSharedPreferences("tvoice", MODE_PRIVATE).getString("profile_uri", null)?.let(Uri::parse)
-        showLogin()
+        renderRuntimeState()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        renderRuntimeState()
+    }
+
+    private fun renderRuntimeState() {
+        ownNumber = TvoiceRuntime.activeUsername.ifBlank { TvoiceRuntime.savedUsername().orEmpty() }
+        when (TvoiceRuntime.callState) {
+            CallState.IncomingReceived -> showCall(TvoiceRuntime.remoteNumber, "Входящий вызов", true)
+            CallState.OutgoingInit, CallState.OutgoingProgress, CallState.OutgoingRinging ->
+                showCall(TvoiceRuntime.remoteNumber, "Вызов…")
+            CallState.Connected, CallState.StreamsRunning -> showCall(TvoiceRuntime.remoteNumber, "Соединено")
+            CallState.Paused -> showCall(TvoiceRuntime.remoteNumber, "Удержание")
+            else -> when (TvoiceRuntime.registrationState) {
+                RegistrationState.Ok -> showDialer()
+                RegistrationState.Progress -> showConnecting()
+                else -> if (ownNumber.isNotBlank()) {
+                    startSipService(restore = true)
+                    if (TvoiceRuntime.restoreSavedAccount()) showConnecting() else showLogin()
+                } else showLogin()
+            }
+        }
     }
 
     private fun createShell(showNavigation: Boolean = true) {
@@ -123,25 +152,73 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     }
 
     private fun ensureAudioPermissionAndLogin() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 10)
-        else register()
+        val missing = mutableListOf<String>()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            missing += Manifest.permission.RECORD_AUDIO
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            missing += Manifest.permission.POST_NOTIFICATIONS
+        }
+        if (missing.isNotEmpty()) ActivityCompat.requestPermissions(this, missing.toTypedArray(), 10)
+        else ensureFullScreenAccessAndLogin()
+    }
+
+    private fun ensureFullScreenAccessAndLogin() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
+            getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
+        ) {
+            register()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Показывать входящие звонки")
+            .setMessage("Разрешите Tvoice открывать экран входящего звонка поверх экрана блокировки.")
+            .setNegativeButton("Позже") { _, _ -> register() }
+            .setPositiveButton("Открыть настройки") { _, _ ->
+                val settings = Intent(
+                    Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                    Uri.parse("package:$packageName")
+                )
+                runCatching { startActivityForResult(settings, 12) }.onFailure { register() }
+            }
+            .show()
     }
 
     private fun register() {
+        startSipService(restore = false)
+        showConnecting()
+        try { sip.login(ownNumber, pendingPassword) }
+        catch (e: Exception) { toast(e.message ?: "Ошибка регистрации"); showLogin() }
+    }
+
+    private fun showConnecting() {
         createShell(false)
         val body = screen().apply { gravity = Gravity.CENTER }
         heading(body, ownNumber, 32, blue, 130)
         sub(body, "Подключение к Tvoice…", 17, muted, 10)
         body.addView(ProgressBar(this), LinearLayout.LayoutParams(dp(52), dp(52)).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(28) })
-        try { sip.login(ownNumber, pendingPassword) }
-        catch (e: Exception) { toast(e.message ?: "Ошибка регистрации"); showLogin() }
+    }
+
+    private fun startSipService(restore: Boolean) {
+        val action = if (restore) TvoiceCallService.ACTION_RESTORE else TvoiceCallService.ACTION_START
+        ContextCompat.startForegroundService(this, Intent(this, TvoiceCallService::class.java).setAction(action))
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         when (requestCode) {
-            10 -> if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) register() else toast("Для звонков нужен доступ к микрофону")
+            10 -> {
+                val microphoneIndex = permissions.indexOf(Manifest.permission.RECORD_AUDIO)
+                val microphoneGranted = microphoneIndex < 0 || grantResults.getOrNull(microphoneIndex) == PackageManager.PERMISSION_GRANTED
+                if (microphoneGranted) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                    ) toast("Разрешите уведомления, чтобы видеть входящие звонки")
+                    ensureFullScreenAccessAndLogin()
+                } else toast("Для звонков нужен доступ к микрофону")
+            }
             11 -> showContacts()
         }
     }
@@ -279,8 +356,14 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         settingCard(body, "SIP-сервер", "185.177.2.115:5060", "UDP")
         settingCard(body, "Состояние", "Регистрация SIP", "В сети")
         section(body, "Приложение")
-        settingCard(body, "Версия", "Tvoice для Android • Tvoice SIP Core", "0.4.0")
-        primaryButton(body, "Выйти из аккаунта", red, 22) { sip.logout(); ownNumber = ""; pendingPassword = ""; showLogin() }
+        settingCard(body, "Версия", "Tvoice для Android • Tvoice SIP Core", "0.5.0")
+        primaryButton(body, "Выйти из аккаунта", red, 22) {
+            sip.logout()
+            stopService(Intent(this, TvoiceCallService::class.java))
+            ownNumber = ""
+            pendingPassword = ""
+            showLogin()
+        }
     }
 
     private fun showCall(remote: String, state: String, incoming: Boolean = false) {
@@ -310,6 +393,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     override fun onRegistration(state: RegistrationState, message: String) = runOnUiThread {
         when (state) {
             RegistrationState.Ok -> {
+                ownNumber = TvoiceRuntime.activeUsername
                 if (addingAccount) {
                     accountNumbers.add(pendingAddedNumber); ownNumber = pendingAddedNumber; addingAccount = false; showAccount()
                 } else {
@@ -331,7 +415,15 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             CallState.OutgoingInit, CallState.OutgoingProgress, CallState.OutgoingRinging -> showCall(remote, "Вызов…")
             CallState.Connected, CallState.StreamsRunning -> showCall(remote, "Соединено")
             CallState.Paused -> showCall(remote, "Удержание")
-            CallState.End, CallState.Error, CallState.Released -> showDialer()
+            CallState.Error -> {
+                toast("Ошибка звонка: $message")
+                showDialer()
+            }
+            CallState.End -> {
+                if (message.isNotBlank()) toast(message)
+                showDialer()
+            }
+            CallState.Released -> Unit
             else -> Unit
         }
     }
@@ -354,6 +446,10 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     @Deprecated("Legacy result API used for broad Android compatibility")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 12) {
+            register()
+            return
+        }
         if (requestCode == 20 && resultCode == RESULT_OK) {
             data?.data?.let { uri ->
                 runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
@@ -502,5 +598,8 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     private fun now() = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()
-    override fun onDestroy() { sip.destroy(); super.onDestroy() }
+    override fun onDestroy() {
+        TvoiceRuntime.removeObserver(this)
+        super.onDestroy()
+    }
 }

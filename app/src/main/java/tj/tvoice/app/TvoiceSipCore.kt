@@ -70,6 +70,7 @@ internal class TvoiceSipCore(
     private var registrationRequestedExpires = 0
     private var registered = false
     private var keepAlive: ScheduledFuture<*>? = null
+    private var mappedContact: ViaMapping? = null
     private var dialog: Dialog? = null
     private var muted = false
     private var speaker = false
@@ -242,10 +243,11 @@ internal class TvoiceSipCore(
             "To: <sip:$username@${SipConfig.DOMAIN}>",
             "Call-ID: $registrationCallId",
             "CSeq: $registrationCseq REGISTER",
-            "Contact: <${contactUri()}>;expires=$expires",
+            "Contact: <${contactUri()}>;ob;expires=$expires",
             "Expires: $expires",
-            "User-Agent: Tvoice/0.4 TvoiceSipCore/1.0",
-            "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE"
+            "User-Agent: Tvoice/0.5 TvoiceSipCore/1.1",
+            "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE",
+            "Supported: path, gruu, outbound"
         )
         registrationChallenge?.let { challenge ->
             registrationNonceCount += 1
@@ -276,7 +278,7 @@ internal class TvoiceSipCore(
             "Contact: <${contactUri()}>",
             "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE",
             "Supported: replaces, timer",
-            "User-Agent: Tvoice/0.4 TvoiceSipCore/1.0"
+            "User-Agent: Tvoice/0.5 TvoiceSipCore/1.1"
         )
         call.routeSet.forEach { headers += "Route: $it" }
         call.authChallenge?.let { challenge ->
@@ -297,7 +299,7 @@ internal class TvoiceSipCore(
             "To: <sip:${call.remoteUser}@${SipConfig.DOMAIN}>${call.remoteTag?.let { ";tag=$it" }.orEmpty()}",
             "Call-ID: ${call.callId}",
             "CSeq: ${call.localCseq} CANCEL",
-            "User-Agent: Tvoice/0.4 TvoiceSipCore/1.0"
+            "User-Agent: Tvoice/0.5 TvoiceSipCore/1.1"
         )
         sendRequest("CANCEL $uri SIP/2.0", headers, "", call.peer)
     }
@@ -312,7 +314,7 @@ internal class TvoiceSipCore(
             "To: ${response.header("To") ?: "<sip:${call.remoteUser}@${SipConfig.DOMAIN}>"}",
             "Call-ID: ${call.callId}",
             "CSeq: ${response.cseqNumber() ?: call.localCseq} ACK",
-            "User-Agent: Tvoice/0.4 TvoiceSipCore/1.0"
+            "User-Agent: Tvoice/0.5 TvoiceSipCore/1.1"
         )
         if (!non2xx) call.routeSet.forEach { headers += "Route: $it" }
         sendRequest("ACK $uri SIP/2.0", headers, "", call.peer)
@@ -328,7 +330,7 @@ internal class TvoiceSipCore(
             "Call-ID: ${call.callId}",
             "CSeq: ${call.localCseq} $method",
             "Contact: <${contactUri()}>",
-            "User-Agent: Tvoice/0.4 TvoiceSipCore/1.0"
+            "User-Agent: Tvoice/0.5 TvoiceSipCore/1.1"
         )
         call.routeSet.forEach { headers += "Route: $it" }
         if (contentType != null) headers += "Content-Type: $contentType"
@@ -370,6 +372,11 @@ internal class TvoiceSipCore(
 
     private fun handleRegisterResponse(message: SipMessage, status: Int) {
         if (message.header("Call-ID") != registrationCallId) return
+        val mappingChanged = ViaMapping.parse(message.header("Via"))?.let { discovered ->
+            val changed = discovered != mappedContact
+            mappedContact = discovered
+            changed
+        } ?: false
         when (status) {
             200 -> {
                 registrationAuthAttempts = 0
@@ -386,7 +393,12 @@ internal class TvoiceSipCore(
                 keepAlive?.cancel(false)
                 keepAlive = worker.schedule({
                     if (running.get() && registered) runCatching { sendRegister(300) }
-                }, 240, TimeUnit.SECONDS)
+                }, 45, TimeUnit.SECONDS)
+                // A server that accepts REGISTER without a challenge first saw the private Contact.
+                // Repeat once with the public received/rport mapping learned from its response.
+                if (mappingChanged) worker.schedule({
+                    if (running.get() && registered) runCatching { sendRegister(300) }
+                }, 250, TimeUnit.MILLISECONDS)
             }
             401, 407 -> {
                 if (registrationAuthAttempts >= 2) {
@@ -560,6 +572,15 @@ internal class TvoiceSipCore(
         sendResponse(message, 100, "Trying", source, call.localTag)
         sendResponse(message, 180, "Ringing", source, call.localTag)
         listener.onCall(CallState.IncomingReceived, remoteUser, "Входящий вызов")
+        worker.schedule({
+            val active = dialog
+            if (active?.callId == call.callId && !active.accepted && !active.connected) {
+                active.incomingInvite?.let {
+                    runCatching { sendResponse(it, 480, "Temporarily Unavailable", active.peer, active.localTag) }
+                }
+                finishCall(CallState.End, "Пропущенный вызов")
+            }
+        }, 60, TimeUnit.SECONDS)
     }
 
     private fun handleIncomingAck(message: SipMessage, source: InetSocketAddress) {
@@ -599,7 +620,7 @@ internal class TvoiceSipCore(
         request.header("CSeq")?.let { headers += "CSeq: $it" }
         headers += "Contact: <${contactUri()}>"
         headers += "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE"
-        headers += "User-Agent: Tvoice/0.4 TvoiceSipCore/1.0"
+        headers += "User-Agent: Tvoice/0.5 TvoiceSipCore/1.1"
         if (body.isNotEmpty()) headers += "Content-Type: application/sdp"
         sendRequest("SIP/2.0 $code $reason", headers, body, target)
     }
@@ -659,7 +680,13 @@ internal class TvoiceSipCore(
         }
     }.getOrElse { InetAddress.getByName("0.0.0.0") }
 
-    private fun contactUri(): String = "sip:$username@${hostPort()};transport=udp"
+    private fun contactUri(): String = "sip:$username@${contactHostPort()};transport=udp"
+
+    private fun contactHostPort(): String {
+        val mapping = mappedContact ?: return hostPort()
+        val formatted = if (mapping.address.contains(':')) "[${mapping.address}]" else mapping.address
+        return "$formatted:${mapping.port}"
+    }
 
     private fun hostPort(): String {
         val host = localAddress.hostAddress ?: "0.0.0.0"

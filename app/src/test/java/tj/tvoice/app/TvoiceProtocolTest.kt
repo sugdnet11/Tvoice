@@ -56,4 +56,12 @@ class TvoiceProtocolTest {
             assertTrue("mu-law $sample -> $ulaw", kotlin.math.abs(ulaw - sample) < 1200)
         }
     }
+
+    @Test
+    fun readsPublicUdpMappingFromVia() {
+        val mapping = ViaMapping.parse(
+            "SIP/2.0/UDP 192.168.1.20:49152;branch=z9hG4bK-test;received=203.0.113.17;rport=62001"
+        )
+        assertEquals(ViaMapping("203.0.113.17", 62001), mapping)
+    }
 }

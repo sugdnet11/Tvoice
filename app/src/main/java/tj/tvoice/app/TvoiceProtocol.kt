@@ -237,3 +237,17 @@ internal fun headerUri(value: String?): String? {
     val bracketed = value.substringAfter('<', "").substringBefore('>', "")
     return (bracketed.ifEmpty { value.substringBefore(';') }).trim().ifEmpty { null }
 }
+
+internal data class ViaMapping(val address: String, val port: Int) {
+    companion object {
+        fun parse(via: String?): ViaMapping? {
+            if (via == null) return null
+            val address = Regex("(?:^|;)\\s*received=([^;,\\s]+)", RegexOption.IGNORE_CASE)
+                .find(via)?.groupValues?.getOrNull(1)?.trim('[', ']') ?: return null
+            val port = Regex("(?:^|;)\\s*rport\\s*=\\s*(\\d+)", RegexOption.IGNORE_CASE)
+                .find(via)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return null
+            if (port !in 1..65535) return null
+            return ViaMapping(address, port)
+        }
+    }
+}
