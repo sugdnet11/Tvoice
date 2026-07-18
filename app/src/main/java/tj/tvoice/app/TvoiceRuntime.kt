@@ -31,6 +31,7 @@ object TvoiceRuntime : SipManager.Observer {
     fun initialize(context: Context) {
         if (manager != null) return
         appContext = context.applicationContext
+        ChatStore.initialize(appContext)
         manager = SipManager(appContext, this)
     }
 
@@ -92,10 +93,22 @@ object TvoiceRuntime : SipManager.Observer {
     fun accept() = requireManager().accept()
     fun hangup() = requireManager().hangup()
     fun sendDtmf(digit: Char) = requireManager().sendDtmf(digit)
+    fun sendMessage(number: String, text: String) {
+        val peer = number.trim()
+        val body = text.trim()
+        require(peer.isNotBlank()) { "Введите номер абонента" }
+        require(body.isNotBlank()) { "Введите сообщение" }
+        ChatStore.addOutgoing(activeUsername, peer, body)
+        requireManager().sendMessage(peer, body)
+    }
     fun toggleHold(): Boolean = requireManager().toggleHold()
     fun toggleMute(): Boolean = requireManager().toggleMute()
     fun toggleSpeaker(): Boolean = requireManager().toggleSpeaker()
     fun addToConference(number: String) = requireManager().addToConference(number)
+    fun reconnectNetwork() {
+        ChatStore.failSending()
+        requireManager().reconnect()
+    }
 
     @Synchronized
     fun logout() {
@@ -126,6 +139,16 @@ object TvoiceRuntime : SipManager.Observer {
         callMessage = message
         observers.forEach { observer -> runCatching { observer.onCall(state, remote, message) } }
         if (state == CallState.Released) callState = CallState.Idle
+    }
+
+    override fun onMessage(state: MessageState, remote: String, text: String, message: String) {
+        when (state) {
+            MessageState.Received -> ChatStore.addIncoming(activeUsername, remote, text)
+            MessageState.Sent -> ChatStore.markLatest(activeUsername, remote, text, delivered = true)
+            MessageState.Error -> ChatStore.markLatest(activeUsername, remote, text, delivered = false)
+            MessageState.Sending -> Unit
+        }
+        observers.forEach { observer -> runCatching { observer.onMessage(state, remote, text, message) } }
     }
 
     private fun requireManager(): SipManager = checkNotNull(manager) { "TvoiceRuntime не инициализирован" }

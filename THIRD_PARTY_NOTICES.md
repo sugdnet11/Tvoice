@@ -16,4 +16,4 @@ https://www.apache.org/licenses/LICENSE-2.0
 The Eclipse Public License 1.0 text is available at:
 https://www.eclipse.org/legal/epl-v10.html
 
-No Linphone, Liblinphone, PJSIP, Zoiper or MicroSIP binaries or source code are included in Tvoice 0.6.
+No Linphone, Liblinphone, PJSIP, Zoiper or MicroSIP binaries or source code are included in Tvoice 0.7.

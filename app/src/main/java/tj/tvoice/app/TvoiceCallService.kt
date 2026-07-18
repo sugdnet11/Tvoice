@@ -13,20 +13,49 @@ import android.graphics.drawable.Icon
 import android.media.AudioAttributes
 import android.media.Ringtone
 import android.media.RingtoneManager
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 
 /** Keeps SIP/UDP registration alive and exposes calls through Android's native call UI. */
 class TvoiceCallService : Service(), SipManager.Observer {
     private var manualRingtone: Ringtone? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private lateinit var connectivityManager: ConnectivityManager
+    @Volatile private var currentNetwork: Network? = null
+    private var networkCallbackRegistered = false
+    private val reconnectAfterNetworkChange = Runnable {
+        if (currentNetwork != null && TvoiceRuntime.activeUsername.isNotBlank()) {
+            TvoiceRuntime.reconnectNetwork()
+        }
+    }
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            val changed = currentNetwork != null && currentNetwork != network
+            val restored = currentNetwork == null
+            currentNetwork = network
+            if (changed || restored) scheduleNetworkReconnect()
+        }
+
+        override fun onLost(network: Network) {
+            if (currentNetwork == network) currentNetwork = null
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannels()
         TvoiceRuntime.initialize(this)
         TvoiceRuntime.addObserver(this)
+        connectivityManager = getSystemService(ConnectivityManager::class.java)
+        currentNetwork = connectivityManager.activeNetwork
+        connectivityManager.registerDefaultNetworkCallback(networkCallback)
+        networkCallbackRegistered = true
         updateServiceNotification("Подготовка SIP-соединения…")
     }
 
@@ -50,8 +79,18 @@ class TvoiceCallService : Service(), SipManager.Observer {
 
     override fun onDestroy() {
         stopManualRingtone()
+        mainHandler.removeCallbacks(reconnectAfterNetworkChange)
+        if (networkCallbackRegistered) {
+            runCatching { connectivityManager.unregisterNetworkCallback(networkCallback) }
+            networkCallbackRegistered = false
+        }
         TvoiceRuntime.removeObserver(this)
         super.onDestroy()
+    }
+
+    private fun scheduleNetworkReconnect() {
+        mainHandler.removeCallbacks(reconnectAfterNetworkChange)
+        mainHandler.postDelayed(reconnectAfterNetworkChange, 1_500)
     }
 
     override fun onRegistration(state: RegistrationState, message: String) {
@@ -87,6 +126,29 @@ class TvoiceCallService : Service(), SipManager.Observer {
             }
             else -> Unit
         }
+    }
+
+    override fun onMessage(state: MessageState, remote: String, text: String, message: String) {
+        if (state != MessageState.Received || TvoiceRuntime.isMainUiVisible) return
+        val open = PendingIntent.getActivity(
+            this,
+            3000 + remote.hashCode().and(0x7fff),
+            Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                .putExtra(MainActivity.EXTRA_OPEN_CHAT, remote),
+            immutableUpdateFlags()
+        )
+        val notification = Notification.Builder(this, CHAT_CHANNEL)
+            .setSmallIcon(R.drawable.ic_chat)
+            .setContentTitle(remote)
+            .setContentText(text)
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .setCategory(Notification.CATEGORY_MESSAGE)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setColor(Color.rgb(26, 76, 221))
+            .build()
+        notificationManager().notify(CHAT_NOTIFICATION_BASE + remote.hashCode().and(0x0fff), notification)
     }
 
     private fun updateServiceNotification(text: String) {
@@ -248,7 +310,15 @@ class TvoiceCallService : Service(), SipManager.Observer {
                 AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).build()
             )
         }
-        notificationManager().createNotificationChannels(listOf(service, calls))
+        val chats = NotificationChannel(
+            CHAT_CHANNEL,
+            "Сообщения Tvoice",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Новые сообщения от SIP-абонентов"
+            enableVibration(true)
+        }
+        notificationManager().createNotificationChannels(listOf(service, calls, chats))
     }
 
     private fun notificationManager(): NotificationManager = getSystemService(NotificationManager::class.java)
@@ -264,7 +334,9 @@ class TvoiceCallService : Service(), SipManager.Observer {
 
         private const val SERVICE_CHANNEL = "tvoice_service_v1"
         private const val CALL_CHANNEL = "tvoice_calls_v1"
+        private const val CHAT_CHANNEL = "tvoice_messages_v1"
         private const val SERVICE_NOTIFICATION_ID = 5101
         private const val CALL_NOTIFICATION_ID = 5102
+        private const val CHAT_NOTIFICATION_BASE = 5200
     }
 }

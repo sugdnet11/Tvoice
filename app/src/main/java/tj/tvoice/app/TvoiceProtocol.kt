@@ -22,6 +22,10 @@ enum class CallState {
     Released
 }
 
+enum class MessageState {
+    Sending, Sent, Received, Error
+}
+
 internal data class SipMessage(
     val startLine: String,
     val headers: Map<String, List<String>>,

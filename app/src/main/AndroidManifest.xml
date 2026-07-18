@@ -15,8 +15,8 @@
 
     <application
         android:allowBackup="false"
-        android:icon="@drawable/ic_tvoice"
-        android:roundIcon="@drawable/ic_tvoice"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="Tvoice"
         android:supportsRtl="true"
         android:theme="@style/Theme.Tvoice"

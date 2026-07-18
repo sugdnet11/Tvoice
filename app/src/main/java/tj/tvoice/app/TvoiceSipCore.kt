@@ -19,6 +19,7 @@ internal class TvoiceSipCore(
     interface Listener {
         fun onRegistration(state: RegistrationState, message: String)
         fun onCall(state: CallState, remote: String, message: String)
+        fun onMessage(state: MessageState, remote: String, text: String, message: String)
     }
 
     private data class Dialog(
@@ -46,6 +47,19 @@ internal class TvoiceSipCore(
         var nonceCount: Int = 0
     )
 
+    private data class MessageTransaction(
+        val remoteUser: String,
+        val text: String,
+        val callId: String,
+        val localTag: String,
+        var cseq: Int = 1,
+        var branch: String,
+        var challenge: DigestChallenge? = null,
+        var authHeaderName: String = "Authorization",
+        var authAttempts: Int = 0,
+        var nonceCount: Int = 0
+    )
+
     private enum class Direction { OUTGOING, INCOMING }
 
     private val appContext = context.applicationContext
@@ -68,10 +82,15 @@ internal class TvoiceSipCore(
     private var registrationAuthAttempts = 0
     private var registrationNonceCount = 0
     private var registrationRequestedExpires = 0
+    private var registrationPendingCseq: Int? = null
     private var registered = false
     private var keepAlive: ScheduledFuture<*>? = null
+    private var registrationRetry: ScheduledFuture<*>? = null
+    private var retryDelaySeconds = 5L
     private var mappedContact: ViaMapping? = null
     private var dialog: Dialog? = null
+    private val pendingMessages = linkedMapOf<String, MessageTransaction>()
+    private val receivedMessageIds = linkedSetOf<String>()
     private var muted = false
     private var speaker = false
 
@@ -94,6 +113,8 @@ internal class TvoiceSipCore(
             registrationNonceCount = 0
             registered = false
             keepAlive?.cancel(false)
+            registrationRetry?.cancel(false)
+            retryDelaySeconds = 5L
             listener.onRegistration(RegistrationState.Progress, "Регистрация на ${SipConfig.DOMAIN}")
             runCatching { sendRegister(expires = 300) }
                 .onFailure { failRegistration(it.message ?: "Ошибка сети") }
@@ -103,6 +124,7 @@ internal class TvoiceSipCore(
     fun unregister() {
         worker.execute {
             keepAlive?.cancel(false)
+            registrationRetry?.cancel(false)
             if (registered && username.isNotEmpty()) runCatching { sendRegister(expires = 0) }
             registered = false
             listener.onRegistration(RegistrationState.Cleared, "Регистрация отключена")
@@ -218,11 +240,38 @@ internal class TvoiceSipCore(
         }
     }
 
+    fun sendMessage(number: String, text: String) {
+        val remote = number.trim()
+        val body = text.trim()
+        require(remote.isNotBlank()) { "Введите номер абонента" }
+        require(body.isNotBlank()) { "Введите сообщение" }
+        require(body.toByteArray(Charsets.UTF_8).size <= 4_000) { "Сообщение слишком длинное" }
+        worker.execute {
+            if (!registered) {
+                listener.onMessage(MessageState.Error, remote, body, "Нет подключения к SIP")
+                return@execute
+            }
+            val transaction = MessageTransaction(
+                remoteUser = remote,
+                text = body,
+                callId = "${randomHex(12)}@${localAddress.hostAddress}",
+                localTag = randomHex(8),
+                branch = newBranch()
+            )
+            pendingMessages[transaction.callId] = transaction
+            listener.onMessage(MessageState.Sending, remote, body, "Отправка…")
+            runCatching { sendSipMessage(transaction) }
+                .onFailure { failMessage(transaction, it.message ?: "Ошибка сети") }
+        }
+    }
+
     fun close() {
         if (!running.getAndSet(false)) return
         keepAlive?.cancel(false)
+        registrationRetry?.cancel(false)
         runCatching { dialog?.rtp?.close() }
         dialog = null
+        pendingMessages.clear()
         if (registered && username.isNotEmpty()) runCatching { sendRegister(expires = 0) }
         registered = false
         sipSocket.close()
@@ -234,6 +283,7 @@ internal class TvoiceSipCore(
         registrationCseq += 1
         registrationRequestedExpires = expires
         val sentCseq = registrationCseq
+        registrationPendingCseq = sentCseq
         val requestUri = "sip:${SipConfig.DOMAIN}:${SipConfig.PORT}"
         val branch = newBranch()
         val headers = mutableListOf(
@@ -245,7 +295,7 @@ internal class TvoiceSipCore(
             "CSeq: $registrationCseq REGISTER",
             "Contact: <${contactUri()}>;ob;expires=$expires",
             "Expires: $expires",
-            "User-Agent: Tvoice/0.6 TvoiceSipCore/1.2",
+            "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3",
             "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE",
             "Supported: path, gruu, outbound"
         )
@@ -255,10 +305,10 @@ internal class TvoiceSipCore(
             headers += "$registrationAuthHeader: $auth"
         }
         sendRequest("REGISTER $requestUri SIP/2.0", headers, "", server)
-        if (expires > 0 && !registered) {
+        if (expires > 0) {
             worker.schedule({
-                if (!registered && registrationCseq == sentCseq) {
-                    failRegistration("SIP-сервер не ответил")
+                if (registrationPendingCseq == sentCseq && registrationRequestedExpires > 0) {
+                    failRegistration("SIP-сервер не ответил", retry = true)
                 }
             }, 12, TimeUnit.SECONDS)
         }
@@ -278,7 +328,7 @@ internal class TvoiceSipCore(
             "Contact: <${contactUri()}>",
             "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE",
             "Supported: replaces, timer",
-            "User-Agent: Tvoice/0.6 TvoiceSipCore/1.2"
+            "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3"
         )
         call.routeSet.forEach { headers += "Route: $it" }
         call.authChallenge?.let { challenge ->
@@ -299,7 +349,7 @@ internal class TvoiceSipCore(
             "To: <sip:${call.remoteUser}@${SipConfig.DOMAIN}>${call.remoteTag?.let { ";tag=$it" }.orEmpty()}",
             "Call-ID: ${call.callId}",
             "CSeq: ${call.localCseq} CANCEL",
-            "User-Agent: Tvoice/0.6 TvoiceSipCore/1.2"
+            "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3"
         )
         sendRequest("CANCEL $uri SIP/2.0", headers, "", call.peer)
     }
@@ -314,7 +364,7 @@ internal class TvoiceSipCore(
             "To: ${response.header("To") ?: "<sip:${call.remoteUser}@${SipConfig.DOMAIN}>"}",
             "Call-ID: ${call.callId}",
             "CSeq: ${response.cseqNumber() ?: call.localCseq} ACK",
-            "User-Agent: Tvoice/0.6 TvoiceSipCore/1.2"
+            "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3"
         )
         if (!non2xx) call.routeSet.forEach { headers += "Route: $it" }
         sendRequest("ACK $uri SIP/2.0", headers, "", call.peer)
@@ -330,11 +380,45 @@ internal class TvoiceSipCore(
             "Call-ID: ${call.callId}",
             "CSeq: ${call.localCseq} $method",
             "Contact: <${contactUri()}>",
-            "User-Agent: Tvoice/0.6 TvoiceSipCore/1.2"
+            "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3"
         )
         call.routeSet.forEach { headers += "Route: $it" }
         if (contentType != null) headers += "Content-Type: $contentType"
         sendRequest("$method ${call.remoteTarget} SIP/2.0", headers, body, call.peer)
+    }
+
+    private fun sendSipMessage(transaction: MessageTransaction) {
+        val requestUri = "sip:${transaction.remoteUser}@${SipConfig.DOMAIN}"
+        val sentCseq = transaction.cseq
+        val headers = mutableListOf(
+            "Via: SIP/2.0/UDP ${hostPort()};rport;branch=${transaction.branch}",
+            "Max-Forwards: 70",
+            "From: <sip:$username@${SipConfig.DOMAIN}>;tag=${transaction.localTag}",
+            "To: <sip:${transaction.remoteUser}@${SipConfig.DOMAIN}>",
+            "Call-ID: ${transaction.callId}",
+            "CSeq: ${transaction.cseq} MESSAGE",
+            "Contact: <${contactUri()}>",
+            "Content-Type: text/plain; charset=UTF-8",
+            "Accept: text/plain",
+            "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3"
+        )
+        transaction.challenge?.let { challenge ->
+            transaction.nonceCount += 1
+            val auth = DigestAuth.create(
+                challenge,
+                username,
+                password,
+                "MESSAGE",
+                requestUri,
+                transaction.nonceCount
+            )
+            headers += "${transaction.authHeaderName}: $auth"
+        }
+        sendRequest("MESSAGE $requestUri SIP/2.0", headers, transaction.text, server)
+        worker.schedule({
+            val pending = pendingMessages[transaction.callId]
+            if (pending != null && pending.cseq == sentCseq) failMessage(pending, "Сервер не ответил")
+        }, 15, TimeUnit.SECONDS)
     }
 
     private fun receiveLoop() {
@@ -366,12 +450,51 @@ internal class TvoiceSipCore(
         when (message.cseqMethod()) {
             "REGISTER" -> handleRegisterResponse(message, status)
             "INVITE" -> handleInviteResponse(message, status, source)
+            "MESSAGE" -> handleMessageResponse(message, status)
             else -> Unit
+        }
+    }
+
+    private fun handleMessageResponse(message: SipMessage, status: Int) {
+        val callId = message.header("Call-ID") ?: return
+        val transaction = pendingMessages[callId] ?: return
+        if (message.cseqNumber() != transaction.cseq) return
+        when (status) {
+            401, 407 -> {
+                if (transaction.authAttempts >= 2) {
+                    failMessage(transaction, "Сервер отклонил сообщение")
+                    return
+                }
+                val headerName = if (status == 407) "Proxy-Authenticate" else "WWW-Authenticate"
+                val challenge = message.header(headerName)?.let(DigestChallenge::parse)
+                if (challenge == null) {
+                    failMessage(transaction, "Ошибка авторизации сообщения")
+                    return
+                }
+                transaction.challenge = challenge
+                transaction.authHeaderName = if (status == 407) "Proxy-Authorization" else "Authorization"
+                transaction.authAttempts += 1
+                transaction.cseq += 1
+                transaction.branch = newBranch()
+                runCatching { sendSipMessage(transaction) }
+                    .onFailure { failMessage(transaction, it.message ?: "Ошибка сети") }
+            }
+            in 200..299 -> {
+                pendingMessages.remove(callId)
+                listener.onMessage(MessageState.Sent, transaction.remoteUser, transaction.text, "Доставлено серверу")
+            }
+            in 300..699 -> failMessage(
+                transaction,
+                "SIP $status ${message.startLine.substringAfter(status.toString()).trim()}"
+            )
         }
     }
 
     private fun handleRegisterResponse(message: SipMessage, status: Int) {
         if (message.header("Call-ID") != registrationCallId) return
+        val responseCseq = message.cseqNumber() ?: return
+        if (responseCseq != registrationCseq) return
+        registrationPendingCseq = null
         val mappingChanged = ViaMapping.parse(message.header("Via"))?.let { discovered ->
             val changed = discovered != mappedContact
             mappedContact = discovered
@@ -390,6 +513,8 @@ internal class TvoiceSipCore(
                     registered = true
                     listener.onRegistration(RegistrationState.Ok, "Подключено")
                 }
+                registrationRetry?.cancel(false)
+                retryDelaySeconds = 5L
                 keepAlive?.cancel(false)
                 keepAlive = worker.schedule({
                     if (running.get() && registered) runCatching { sendRegister(300) }
@@ -402,18 +527,21 @@ internal class TvoiceSipCore(
             }
             401, 407 -> {
                 if (registrationAuthAttempts >= 2) {
-                    failRegistration("Сервер отклонил логин или пароль")
+                    failRegistration("Сервер отклонил логин или пароль", retry = false)
                     return
                 }
                 val headerName = if (status == 407) "Proxy-Authenticate" else "WWW-Authenticate"
-                val value = message.header(headerName) ?: run { failRegistration("Сервер не прислал параметры авторизации"); return }
-                val challenge = DigestChallenge.parse(value) ?: run { failRegistration("Не удалось прочитать SIP-аутентификацию"); return }
+                val value = message.header(headerName) ?: run { failRegistration("Сервер не прислал параметры авторизации", retry = false); return }
+                val challenge = DigestChallenge.parse(value) ?: run { failRegistration("Не удалось прочитать SIP-аутентификацию", retry = false); return }
                 registrationChallenge = challenge
                 registrationAuthHeader = if (status == 407) "Proxy-Authorization" else "Authorization"
                 registrationAuthAttempts += 1
                 runCatching { sendRegister(300) }.onFailure { failRegistration(it.message ?: "Ошибка регистрации") }
             }
-            in 300..699 -> failRegistration("SIP $status ${message.startLine.substringAfter(status.toString()).trim()}")
+            in 300..699 -> failRegistration(
+                "SIP $status ${message.startLine.substringAfter(status.toString()).trim()}",
+                retry = status == 408 || status >= 500
+            )
         }
     }
 
@@ -499,6 +627,7 @@ internal class TvoiceSipCore(
     private fun handleRequest(message: SipMessage, source: InetSocketAddress) {
         when (message.method) {
             "INVITE" -> handleIncomingInvite(message, source)
+            "MESSAGE" -> handleIncomingMessage(message, source)
             "ACK" -> handleIncomingAck(message, source)
             "BYE" -> {
                 val call = dialog
@@ -521,6 +650,31 @@ internal class TvoiceSipCore(
             }
             "OPTIONS", "INFO", "NOTIFY", "UPDATE" -> sendResponse(message, 200, "OK", source, dialog?.localTag)
             else -> sendResponse(message, 501, "Not Implemented", source, dialog?.localTag)
+        }
+    }
+
+    private fun handleIncomingMessage(message: SipMessage, source: InetSocketAddress) {
+        if (!registered) {
+            sendResponse(message, 480, "Temporarily Unavailable", source)
+            return
+        }
+        val contentType = message.header("Content-Type").orEmpty()
+        if (contentType.isNotBlank() && !contentType.startsWith("text/plain", ignoreCase = true)) {
+            sendResponse(message, 415, "Unsupported Media Type", source)
+            return
+        }
+        val remoteUri = headerUri(message.header("From")).orEmpty()
+        val remote = remoteUri.substringAfter("sip:").substringBefore('@').ifBlank { "Неизвестный" }
+        val text = message.body.trim().take(4_000)
+        if (text.isBlank()) {
+            sendResponse(message, 400, "Bad Request", source)
+            return
+        }
+        sendResponse(message, 200, "OK", source)
+        val messageId = "${message.header("Call-ID")}:${message.cseqNumber()}"
+        if (receivedMessageIds.add(messageId)) {
+            while (receivedMessageIds.size > 100) receivedMessageIds.remove(receivedMessageIds.first())
+            listener.onMessage(MessageState.Received, remote, text, "Получено")
         }
     }
 
@@ -625,7 +779,7 @@ internal class TvoiceSipCore(
         request.header("CSeq")?.let { headers += "CSeq: $it" }
         headers += "Contact: <${contactUri()}>"
         headers += "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE"
-        headers += "User-Agent: Tvoice/0.6 TvoiceSipCore/1.2"
+        headers += "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3"
         if (body.isNotEmpty()) headers += "Content-Type: application/sdp"
         sendRequest("SIP/2.0 $code $reason", headers, body, target)
     }
@@ -672,10 +826,32 @@ internal class TvoiceSipCore(
         listener.onCall(CallState.Released, call.remoteUser, message)
     }
 
-    private fun failRegistration(message: String) {
+    private fun failMessage(transaction: MessageTransaction, message: String) {
+        if (pendingMessages.remove(transaction.callId) == null) return
+        listener.onMessage(MessageState.Error, transaction.remoteUser, transaction.text, message)
+    }
+
+    private fun failRegistration(message: String, retry: Boolean = true) {
         registered = false
+        registrationPendingCseq = null
         keepAlive?.cancel(false)
+        registrationRetry?.cancel(false)
         listener.onRegistration(RegistrationState.Failed, message)
+        if (!retry || !running.get() || username.isBlank() || password.isBlank()) return
+        val delay = retryDelaySeconds
+        retryDelaySeconds = (retryDelaySeconds * 2).coerceAtMost(60L)
+        registrationRetry = worker.schedule({
+            if (!running.get() || username.isBlank() || password.isBlank() || registered) return@schedule
+            listener.onRegistration(RegistrationState.Progress, "Повторное подключение к SIP…")
+            registrationCallId = "${randomHex(12)}@${localAddress.hostAddress}"
+            registrationTag = randomHex(8)
+            registrationCseq = 0
+            registrationChallenge = null
+            registrationAuthAttempts = 0
+            registrationNonceCount = 0
+            runCatching { sendRegister(expires = 300) }
+                .onFailure { failRegistration(it.message ?: "Ошибка сети", retry = true) }
+        }, delay, TimeUnit.SECONDS)
     }
 
     private fun resolveLocalAddress(): InetAddress = runCatching {

@@ -4,7 +4,7 @@ Tvoice is a branded Android SIP softphone for the Tvoice service.
 
 ## Tvoice SIP Core
 
-Version 0.6 uses the project's own Kotlin implementation and keeps it active in an Android foreground service:
+Version 0.7 uses the project's own Kotlin implementation and keeps it active in an Android foreground service:
 
 - SIP/2.0 registration over UDP;
 - HTTP Digest/MD5 SIP authentication (`401` and `407`);
@@ -19,6 +19,11 @@ Version 0.6 uses the project's own Kotlin implementation and keeps it active in 
 - UDP NAT Contact correction from SIP `received`/`rport` and 45-second registration refreshes.
 - correct authenticated INVITE retry without reusing a challenge `To-tag`;
 - separate light incoming-call UI before the active conversation controls appear.
+- automatic SIP socket recreation after Wi-Fi/mobile network changes;
+- registration recovery with bounded retry delays after temporary network failures.
+- SIP MESSAGE send/receive with Digest authentication and local conversation history;
+- three-section navigation for contacts, calls and chat;
+- compact right-side account panel, Russian/Tajik UI and light/dark themes.
 
 The core is intentionally scoped to the Tvoice server configuration. It does not contain source or binaries from Linphone, PJSIP, Zoiper or MicroSIP.
 
@@ -41,6 +46,8 @@ Every push to `main` builds a debug APK in GitHub Actions. Protocol unit tests a
 ## Security
 
 The current server profile uses SIP/UDP and unencrypted RTP to remain compatible with the existing PBX. TLS and SRTP should be enabled together with matching PBX configuration before carrying sensitive calls over untrusted networks.
+
+SIP chat uses the standard `MESSAGE` method. The PBX must route incoming PJSIP MESSAGE requests to the destination endpoint; the client reports the returned SIP error when routing is unavailable.
 
 ## Ownership and third-party components
 

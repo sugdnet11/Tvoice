@@ -99,7 +99,7 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
             gravity = Gravity.CENTER
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(28) })
         root.addView(TextView(this).apply {
-            text = "Входящий вызов Tvoice"
+            text = t("Входящий вызов Tvoice", "Занги воридотии Tvoice")
             textSize = 17f
             setTextColor(muted)
             gravity = Gravity.CENTER
@@ -110,11 +110,11 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        actions.addView(callAction(R.drawable.ic_call_end, red, "Отклонить") {
+        actions.addView(callAction(R.drawable.ic_call_end, red, t("Отклонить", "Рад кардан")) {
             TvoiceRuntime.hangup()
             finishAndRemoveTask()
         }, LinearLayout.LayoutParams(0, dp(124), 1f))
-        actions.addView(callAction(R.drawable.ic_call, green, "Ответить") { answer() }, LinearLayout.LayoutParams(0, dp(124), 1f))
+        actions.addView(callAction(R.drawable.ic_call, green, t("Ответить", "Ҷавоб додан")) { answer() }, LinearLayout.LayoutParams(0, dp(124), 1f))
         root.addView(actions, LinearLayout.LayoutParams(-1, dp(124)))
         setContentView(root)
     }
@@ -168,6 +168,8 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun t(russian: String, tajik: String): String =
+        if (getSharedPreferences("tvoice", MODE_PRIVATE).getString("language", "ru") == "tg") tajik else russian
 
     companion object {
         private const val ACTION_SHOW = "tj.tvoice.app.action.SHOW_INCOMING"

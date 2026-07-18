@@ -73,4 +73,23 @@ class TvoiceProtocolTest {
         assertTrue(!responseEstablishesDialog(407))
         assertTrue(!responseEstablishesDialog(481))
     }
+
+    @Test
+    fun parsesSipMessageBody() {
+        val raw = (
+            "MESSAGE sip:73302@example.org SIP/2.0\r\n" +
+                "From: <sip:70007@example.org>;tag=chat1\r\n" +
+                "To: <sip:73302@example.org>\r\n" +
+                "Call-ID: message-1\r\n" +
+                "CSeq: 1 MESSAGE\r\n" +
+                "Content-Type: text/plain; charset=UTF-8\r\n" +
+                "Content-Length: 21\r\n\r\n" +
+                "Привет из Tvoice"
+            ).toByteArray(Charsets.UTF_8)
+        val message = SipMessage.parse(raw, raw.size)
+        assertNotNull(message)
+        assertEquals("MESSAGE", message?.method)
+        assertEquals("MESSAGE", message?.cseqMethod())
+        assertEquals("Привет из Tvoice", message?.body)
+    }
 }
