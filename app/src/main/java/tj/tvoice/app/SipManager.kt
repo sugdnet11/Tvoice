@@ -57,7 +57,7 @@ class SipManager(context: Context, private val observer: Observer) {
     fun hangup() { core.currentCall?.terminate() }
     fun toggleMute(): Boolean {
     val muted = core.isMicEnabled
-    core.enableMic(!muted)
+    core.setMicEnabled(!muted)
     return muted
     }
     fun toggleSpeaker(): Boolean {
