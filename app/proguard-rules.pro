@@ -1,2 +1,1 @@
--keep class org.linphone.** { *; }
--dontwarn org.linphone.**
+# Tvoice SIP Core uses only project classes and the Android SDK.

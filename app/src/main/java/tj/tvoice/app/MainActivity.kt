@@ -17,8 +17,6 @@ import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import org.linphone.core.Call
-import org.linphone.core.RegistrationState
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -281,7 +279,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         settingCard(body, "SIP-сервер", "185.177.2.115:5060", "UDP")
         settingCard(body, "Состояние", "Регистрация SIP", "В сети")
         section(body, "Приложение")
-        settingCard(body, "Версия", "Tvoice для Android", "0.3.0")
+        settingCard(body, "Версия", "Tvoice для Android • Tvoice SIP Core", "0.4.0")
         primaryButton(body, "Выйти из аккаунта", red, 22) { sip.logout(); ownNumber = ""; pendingPassword = ""; showLogin() }
     }
 
@@ -324,15 +322,16 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         }
     }
 
-    override fun onCall(state: Call.State, remote: String, message: String) = runOnUiThread {
+    override fun onCall(state: CallState, remote: String, message: String) = runOnUiThread {
         when (state) {
-            Call.State.IncomingReceived -> {
+            CallState.IncomingReceived -> {
                 callHistory.add(0, HistoryItem(remote, "Входящий", now()))
                 showCall(remote, "Входящий вызов", true)
             }
-            Call.State.OutgoingInit, Call.State.OutgoingProgress, Call.State.OutgoingRinging -> showCall(remote, "Вызов…")
-            Call.State.Connected, Call.State.StreamsRunning -> showCall(remote, "Соединено")
-            Call.State.End, Call.State.Error, Call.State.Released -> showDialer()
+            CallState.OutgoingInit, CallState.OutgoingProgress, CallState.OutgoingRinging -> showCall(remote, "Вызов…")
+            CallState.Connected, CallState.StreamsRunning -> showCall(remote, "Соединено")
+            CallState.Paused -> showCall(remote, "Удержание")
+            CallState.End, CallState.Error, CallState.Released -> showDialer()
             else -> Unit
         }
     }
