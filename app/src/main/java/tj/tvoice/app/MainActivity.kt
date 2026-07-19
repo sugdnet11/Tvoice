@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -34,6 +35,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     private lateinit var shell: LinearLayout
     private lateinit var content: FrameLayout
     private lateinit var bottomBar: LinearLayout
+    private var currentScroller: ScrollView? = null
     private var ownNumber = ""
     private var pendingPassword = ""
     private var dialedNumber = ""
@@ -135,21 +137,34 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     }
 
     private fun createShell(showNavigation: Boolean = true) {
-        rootContainer = FrameLayout(this).apply { setBackgroundColor(page) }
+        val fallbackTopInset = statusBarHeight()
+        rootContainer = FrameLayout(this).apply {
+            setBackgroundColor(page)
+            // EMUI/Huawei can deliver the first WindowInsets event late (or not at all
+            // when the content view is replaced). Keep the header below the status bar
+            // from the very first frame and replace this fallback with real insets below.
+            setPadding(0, fallbackTopInset, 0, 0)
+        }
         ViewCompat.setOnApplyWindowInsetsListener(rootContainer) { view, insets ->
-            val system = insets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            val types = WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            val system = insets.getInsets(types)
+            val stable = insets.getInsetsIgnoringVisibility(types)
+            val keyboard = insets.getInsets(WindowInsetsCompat.Type.ime())
+            view.setPadding(
+                maxOf(system.left, stable.left),
+                maxOf(system.top, stable.top, fallbackTopInset),
+                maxOf(system.right, stable.right),
+                maxOf(system.bottom, stable.bottom, keyboard.bottom)
             )
-            view.setPadding(system.left, system.top, system.right, system.bottom)
             insets
         }
-        ViewCompat.requestApplyInsets(rootContainer)
         shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(page)
         }
         if (showNavigation) shell.addView(topBar(), LinearLayout.LayoutParams(-1, dp(62)))
         content = FrameLayout(this)
+        currentScroller = null
         shell.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
         bottomBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -167,6 +182,9 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         shell.addView(bottomBar, LinearLayout.LayoutParams(-1, dp(76)))
         rootContainer.addView(shell, FrameLayout.LayoutParams(-1, -1))
         setContentView(rootContainer)
+        // Insets must be requested after the view is attached. Requesting them before
+        // setContentView is ignored on a number of Huawei/Honor firmware versions.
+        rootContainer.post { ViewCompat.requestApplyInsets(rootContainer) }
     }
 
     private fun topBar(): FrameLayout = FrameLayout(this).apply {
@@ -200,8 +218,12 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         content.removeAllViews()
         if (scroll) {
             val scroller = ScrollView(this).apply { isFillViewport = true; addView(body) }
+            currentScroller = scroller
             content.addView(scroller, FrameLayout.LayoutParams(-1, -1))
-        } else content.addView(body, FrameLayout.LayoutParams(-1, -1))
+        } else {
+            currentScroller = null
+            content.addView(body, FrameLayout.LayoutParams(-1, -1))
+        }
         return body
     }
 
@@ -226,6 +248,8 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         body.addView(card, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(28) })
         val username = modernEdit(card, t("SIP-номер", "Рақами SIP"), t("Например, 70707", "Масалан, 70707"), false)
         val password = modernEdit(card, t("Пароль", "Рамз"), t("Введите пароль", "Рамзро ворид кунед"), true)
+        keepLoginFieldAboveKeyboard(username)
+        keepLoginFieldAboveKeyboard(password)
         primaryButton(card, t("Войти", "Ворид шудан"), blue, 20) {
             ownNumber = username.text.toString().trim()
             pendingPassword = password.text.toString()
@@ -303,6 +327,12 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
                 } else toast(t("Для звонков нужен доступ к микрофону", "Барои зангҳо дастрасӣ ба микрофон лозим аст"))
             }
             11 -> showContacts()
+            13 -> if (grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) {
+                toast(t(
+                    "Android не разрешил уведомления. Их можно оставить включёнными в Tvoice и разрешить позже.",
+                    "Android ба огоҳиномаҳо иҷозат надод. Онҳоро дар Tvoice фаъол монда, баъдтар иҷозат додан мумкин аст."
+                ))
+            }
         }
     }
 
@@ -835,15 +865,15 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         compactSetting(
             scrollBody,
             t("Звук звонка", "Овози занг"),
-            t("Мелодия и вибрация", "Оҳанг ва ларзиш"),
+            soundSettingsSummary(),
             blue
-        ) { openIncomingCallSoundSettings() }
+        ) { showSoundSettingsDialog() }
         compactSetting(
             scrollBody,
             t("Уведомления", "Огоҳиномаҳо"),
-            if (notificationsEnabled()) t("Включены", "Фаъол") else t("Выключены", "Хомӯш"),
-            if (notificationsEnabled()) green else red
-        ) { openNotificationSettings() }
+            notificationSettingsSummary(),
+            if (notificationsEnabled() && appNotificationsEnabled()) green else red
+        ) { showNotificationSettingsDialog() }
         compactSetting(
             scrollBody,
             t("Язык", "Забон"),
@@ -869,7 +899,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             muted,
             2
         )
-        sub(scrollBody, "Tvoice 0.8.2 • Tvoice SIP Core 1.3", 12, blue, 7)
+        sub(scrollBody, "Tvoice 0.8.4 • Tvoice SIP Core 1.3", 12, blue, 7)
         sub(scrollBody, "Developed by Шогирдои Малем", 12, dark, 5).typeface = Typeface.DEFAULT_BOLD
         compactButton(scrollBody, t("Выйти из аккаунта", "Баромадан аз ҳисоб"), red) {
             sip.logout()
@@ -940,25 +970,141 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     private fun notificationsEnabled(): Boolean =
         getSystemService(NotificationManager::class.java).areNotificationsEnabled()
 
-    private fun openNotificationSettings() {
-        val settings = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-            putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+    private fun soundSettingsSummary(): String {
+        val sound = preferences.getBoolean(TvoiceCallService.PREF_RINGTONE_ENABLED, true)
+        val vibration = preferences.getBoolean(TvoiceCallService.PREF_VIBRATION_ENABLED, true)
+        return when {
+            sound && vibration -> t("Звук и вибрация", "Овоз ва ларзиш")
+            sound -> t("Только звук", "Танҳо овоз")
+            vibration -> t("Только вибрация", "Танҳо ларзиш")
+            else -> t("Без звука", "Беовоз")
         }
-        runCatching { startActivity(settings) }
-            .onFailure { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
     }
 
-    private fun openIncomingCallSoundSettings() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val settings = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
-                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-                putExtra(Settings.EXTRA_CHANNEL_ID, TvoiceCallService.INCOMING_CALL_CHANNEL)
-            }
-            runCatching { startActivity(settings) }
-                .onFailure { openNotificationSettings() }
-        } else {
-            openNotificationSettings()
+    private fun appNotificationsEnabled(): Boolean =
+        preferences.getBoolean(TvoiceCallService.PREF_CALL_NOTIFICATIONS_ENABLED, true) ||
+            preferences.getBoolean(TvoiceCallService.PREF_CHAT_NOTIFICATIONS_ENABLED, true)
+
+    private fun notificationSettingsSummary(): String {
+        if (!notificationsEnabled()) return t("Нужно разрешение", "Иҷоза лозим")
+        val calls = preferences.getBoolean(TvoiceCallService.PREF_CALL_NOTIFICATIONS_ENABLED, true)
+        val chats = preferences.getBoolean(TvoiceCallService.PREF_CHAT_NOTIFICATIONS_ENABLED, true)
+        return when {
+            calls && chats -> t("Включены", "Фаъол")
+            calls || chats -> t("Частично", "Қисман")
+            else -> t("Выключены", "Хомӯш")
         }
+    }
+
+    private fun showSoundSettingsDialog() {
+        val body = settingsDialogBody(
+            t(
+                "Настройте сигнал входящего звонка, не покидая Tvoice.",
+                "Овози занги воридотиро бе баромадан аз Tvoice танзим кунед."
+            )
+        )
+        settingsSwitch(
+            body,
+            t("Звук входящего звонка", "Овози занги воридотӣ"),
+            t("Используется мелодия телефона", "Оҳанги телефон истифода мешавад"),
+            TvoiceCallService.PREF_RINGTONE_ENABLED,
+            true
+        )
+        settingsSwitch(
+            body,
+            t("Вибрация", "Ларзиш"),
+            t("Вибрация при входящем звонке", "Ларзиш ҳангоми занги воридотӣ"),
+            TvoiceCallService.PREF_VIBRATION_ENABLED,
+            true
+        )
+        AlertDialog.Builder(this)
+            .setTitle(t("Звук звонка", "Овози занг"))
+            .setView(body)
+            .setPositiveButton(t("Готово", "Тайёр"), null)
+            .setOnDismissListener { refreshCallServiceSettings() }
+            .show()
+    }
+
+    private fun showNotificationSettingsDialog() {
+        val body = settingsDialogBody(
+            t(
+                "Выберите уведомления Tvoice. Служебное уведомление подключения требуется Android и остаётся включённым.",
+                "Огоҳиномаҳои Tvoice-ро интихоб кунед. Огоҳиномаи хизматии пайвастшавӣ барои Android лозим аст."
+            )
+        )
+        settingsSwitch(
+            body,
+            t("Входящие звонки", "Зангҳои воридотӣ"),
+            t("Окно ответа при работе в фоне", "Равзанаи ҷавоб дар замина"),
+            TvoiceCallService.PREF_CALL_NOTIFICATIONS_ENABLED,
+            true,
+            requestPermissionWhenEnabled = true
+        )
+        settingsSwitch(
+            body,
+            t("Сообщения чата", "Паёмҳои чат"),
+            t("Уведомлять о новых сообщениях", "Дар бораи паёмҳои нав огоҳ кунад"),
+            TvoiceCallService.PREF_CHAT_NOTIFICATIONS_ENABLED,
+            true,
+            requestPermissionWhenEnabled = true
+        )
+        AlertDialog.Builder(this)
+            .setTitle(t("Уведомления", "Огоҳиномаҳо"))
+            .setView(body)
+            .setPositiveButton(t("Готово", "Тайёр"), null)
+            .show()
+    }
+
+    private fun settingsDialogBody(description: String): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(18), dp(4), dp(18), dp(8))
+        sub(this, description, 12, muted, 0)
+    }
+
+    private fun settingsSwitch(
+        parent: LinearLayout,
+        title: String,
+        description: String,
+        preferenceKey: String,
+        defaultValue: Boolean,
+        requestPermissionWhenEnabled: Boolean = false
+    ) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(8), dp(10))
+            background = rounded(surface, dp(14).toFloat(), line, 1)
+        }
+        val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        heading(texts, title, 14, dark, 0)
+        sub(texts, description, 11, muted, 3)
+        row.addView(texts, LinearLayout.LayoutParams(0, -2, 1f))
+        val toggle = Switch(this).apply {
+            isChecked = preferences.getBoolean(preferenceKey, defaultValue)
+            setOnCheckedChangeListener { _, enabled ->
+                preferences.edit().putBoolean(preferenceKey, enabled).apply()
+                if (enabled && requestPermissionWhenEnabled) requestNotificationPermissionIfNeeded()
+                refreshCallServiceSettings()
+            }
+        }
+        row.setOnClickListener { toggle.isChecked = !toggle.isChecked }
+        row.addView(toggle, LinearLayout.LayoutParams(-2, -2))
+        parent.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 13)
+        }
+    }
+
+    private fun refreshCallServiceSettings() {
+        startService(
+            Intent(this, TvoiceCallService::class.java)
+                .setAction(TvoiceCallService.ACTION_SETTINGS_CHANGED)
+        )
     }
 
     private fun showThemeDialog() {
@@ -1039,8 +1185,14 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             background = rounded(blue, dp(primarySize / 2).toFloat())
         }
         body.addView(avatar, LinearLayout.LayoutParams(dp(primarySize), dp(primarySize)))
-        heading(body, remote, if (veryCompact) 30 else if (compact) 34 else 38, dark, if (compact) 14 else 20)
-        sub(body, state, if (veryCompact) 14 else 16, if (isDarkTheme) cyan else Color.rgb(47, 107, 219), 6)
+        heading(body, remote, if (veryCompact) 30 else if (compact) 34 else 38, dark, if (compact) 14 else 20).apply {
+            gravity = Gravity.CENTER
+            textAlignment = View.TEXT_ALIGNMENT_CENTER
+        }
+        sub(body, state, if (veryCompact) 14 else 16, if (isDarkTheme) cyan else Color.rgb(47, 107, 219), 6).apply {
+            gravity = Gravity.CENTER
+            textAlignment = View.TEXT_ALIGNMENT_CENTER
+        }
         val spacer = Space(this); body.addView(spacer, LinearLayout.LayoutParams(1, 0, 1f))
         val keypad = callKeypad(compact).apply { visibility = View.GONE }
         body.addView(keypad, LinearLayout.LayoutParams(-1, dp(keypadHeight)))
@@ -1298,6 +1450,19 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         this.text = text; textSize = 27f; setTextColor(textColor); gravity = Gravity.CENTER; background = rounded(backgroundColor, dp(38).toFloat(), line, 1); elevation = dp(3).toFloat(); setOnClickListener { action() }
     }
 
+    private fun keepLoginFieldAboveKeyboard(field: EditText) {
+        field.setOnFocusChangeListener { view, hasFocus ->
+            if (!hasFocus) return@setOnFocusChangeListener
+            // Wait until the keyboard reports its final height, then reveal the whole
+            // field with a small breathing space above it.
+            view.postDelayed({
+                val rectangle = Rect(0, 0, view.width, view.height + dp(28))
+                view.requestRectangleOnScreen(rectangle, true)
+                currentScroller?.smoothScrollBy(0, dp(20))
+            }, 280)
+        }
+    }
+
     private fun callControl(icon: String, label: String, action: () -> Unit) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
         val i = TextView(this@MainActivity).apply { text = icon; textSize = 26f; gravity = Gravity.CENTER; setTextColor(Color.WHITE); background = rounded(Color.argb(45, 255, 255, 255), dp(30).toFloat()); setOnClickListener { action() } }
@@ -1341,6 +1506,11 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     private fun formatTime(timestamp: Long) = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
     private fun now() = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+    @Suppress("DiscouragedApi")
+    private fun statusBarHeight(): Int {
+        val resourceId = resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (resourceId > 0) resources.getDimensionPixelSize(resourceId) else dp(24)
+    }
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()
     override fun onDestroy() {
         TvoiceRuntime.removeObserver(this)

@@ -15,12 +15,13 @@ import android.media.Ringtone
 import android.media.RingtoneManager
 import android.net.ConnectivityManager
 import android.net.Network
-import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.provider.Settings
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 
 /** Keeps SIP/UDP registration alive and exposes calls through Android's native call UI. */
 class TvoiceCallService : Service(), SipManager.Observer {
@@ -65,8 +66,12 @@ class TvoiceCallService : Service(), SipManager.Observer {
             ACTION_INCOMING_SCREEN_VISIBLE -> {
                 if (TvoiceRuntime.callState == CallState.IncomingReceived) {
                     notificationManager().cancel(CALL_NOTIFICATION_ID)
-                    startManualRingtone()
+                    startIncomingAlerts()
                 }
+            }
+            ACTION_SETTINGS_CHANGED -> {
+                stopIncomingAlerts()
+                if (TvoiceRuntime.callState == CallState.IncomingReceived) startIncomingAlerts()
             }
             ACTION_DECLINE -> TvoiceRuntime.hangup()
             ACTION_HANGUP -> TvoiceRuntime.hangup()
@@ -78,7 +83,7 @@ class TvoiceCallService : Service(), SipManager.Observer {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        stopManualRingtone()
+        stopIncomingAlerts()
         mainHandler.removeCallbacks(reconnectAfterNetworkChange)
         if (networkCallbackRegistered) {
             runCatching { connectivityManager.unregisterNetworkCallback(networkCallback) }
@@ -107,20 +112,20 @@ class TvoiceCallService : Service(), SipManager.Observer {
     override fun onCall(state: CallState, remote: String, message: String) {
         when (state) {
             CallState.IncomingReceived -> {
+                stopIncomingAlerts()
+                startIncomingAlerts()
                 if (TvoiceRuntime.isMainUiVisible) {
                     notificationManager().cancel(CALL_NOTIFICATION_ID)
-                    startManualRingtone()
-                } else {
-                    stopManualRingtone()
+                } else if (callNotificationsEnabled()) {
                     showIncomingCall(remote)
                 }
             }
             CallState.Connected, CallState.StreamsRunning, CallState.Paused -> {
-                stopManualRingtone()
+                stopIncomingAlerts()
                 showOngoingCall(remote, onHold = state == CallState.Paused)
             }
             CallState.End, CallState.Error, CallState.Released -> {
-                stopManualRingtone()
+                stopIncomingAlerts()
                 notificationManager().cancel(CALL_NOTIFICATION_ID)
                 updateServiceNotification("${TvoiceRuntime.activeUsername} • в сети")
             }
@@ -129,7 +134,7 @@ class TvoiceCallService : Service(), SipManager.Observer {
     }
 
     override fun onMessage(state: MessageState, remote: String, text: String, message: String) {
-        if (state != MessageState.Received || TvoiceRuntime.isMainUiVisible) return
+        if (state != MessageState.Received || TvoiceRuntime.isMainUiVisible || !chatNotificationsEnabled()) return
         val open = PendingIntent.getActivity(
             this,
             3000 + remote.hashCode().and(0x7fff),
@@ -219,6 +224,7 @@ class TvoiceCallService : Service(), SipManager.Observer {
     }
 
     private fun startManualRingtone() {
+        if (!preferences().getBoolean(PREF_RINGTONE_ENABLED, true)) return
         if (manualRingtone?.isPlaying == true) return
         val ringtone = runCatching {
             RingtoneManager.getRingtone(
@@ -238,6 +244,36 @@ class TvoiceCallService : Service(), SipManager.Observer {
         manualRingtone?.let { runCatching { it.stop() } }
         manualRingtone = null
     }
+
+    private fun startIncomingAlerts() {
+        startManualRingtone()
+        if (!preferences().getBoolean(PREF_VIBRATION_ENABLED, true)) return
+        val pattern = longArrayOf(0, 450, 250, 450)
+        val effect = VibrationEffect.createWaveform(pattern, 0)
+        val attributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+            .build()
+        runCatching { vibrator().vibrate(effect, attributes) }
+    }
+
+    private fun stopIncomingAlerts() {
+        stopManualRingtone()
+        runCatching { vibrator().cancel() }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun vibrator(): Vibrator =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            getSystemService(VibratorManager::class.java).defaultVibrator
+        } else {
+            getSystemService(VIBRATOR_SERVICE) as Vibrator
+        }
+
+    private fun preferences() = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+    private fun callNotificationsEnabled(): Boolean =
+        preferences().getBoolean(PREF_CALL_NOTIFICATIONS_ENABLED, true)
+    private fun chatNotificationsEnabled(): Boolean =
+        preferences().getBoolean(PREF_CHAT_NOTIFICATIONS_ENABLED, true)
 
     private fun showOngoingCall(remote: String, onHold: Boolean) {
         val hangup = servicePendingIntent(20, ACTION_HANGUP)
@@ -304,12 +340,10 @@ class TvoiceCallService : Service(), SipManager.Observer {
         ).apply {
             description = "Входящие и активные звонки Tvoice"
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-            enableVibration(true)
-            vibrationPattern = longArrayOf(0, 450, 250, 450)
-            setSound(
-                Settings.System.DEFAULT_RINGTONE_URI ?: Uri.parse("content://settings/system/ringtone"),
-                AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).build()
-            )
+            // Sound and vibration are controlled by Tvoice preferences so the user
+            // can configure them without leaving the app.
+            enableVibration(false)
+            setSound(null, null)
         }
         val activeCalls = NotificationChannel(
             ACTIVE_CALL_CHANNEL,
@@ -343,13 +377,20 @@ class TvoiceCallService : Service(), SipManager.Observer {
         const val ACTION_INCOMING_SCREEN_VISIBLE = "tj.tvoice.app.action.INCOMING_SCREEN_VISIBLE"
         const val ACTION_DECLINE = "tj.tvoice.app.action.DECLINE"
         const val ACTION_HANGUP = "tj.tvoice.app.action.HANGUP"
+        const val ACTION_SETTINGS_CHANGED = "tj.tvoice.app.action.SETTINGS_CHANGED"
+
+        const val PREF_RINGTONE_ENABLED = "ringtone_enabled"
+        const val PREF_VIBRATION_ENABLED = "vibration_enabled"
+        const val PREF_CALL_NOTIFICATIONS_ENABLED = "call_notifications_enabled"
+        const val PREF_CHAT_NOTIFICATIONS_ENABLED = "chat_notifications_enabled"
 
         private const val SERVICE_CHANNEL = "tvoice_service_v1"
-        const val INCOMING_CALL_CHANNEL = "tvoice_calls_v1"
+        const val INCOMING_CALL_CHANNEL = "tvoice_calls_v2"
         private const val ACTIVE_CALL_CHANNEL = "tvoice_active_calls_v1"
         private const val CHAT_CHANNEL = "tvoice_messages_v1"
         private const val SERVICE_NOTIFICATION_ID = 5101
         private const val CALL_NOTIFICATION_ID = 5102
         private const val CHAT_NOTIFICATION_BASE = 5200
+        private const val PREFERENCES = "tvoice"
     }
 }

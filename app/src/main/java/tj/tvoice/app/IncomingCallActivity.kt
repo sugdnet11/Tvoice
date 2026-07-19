@@ -80,25 +80,30 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
         val horizontalPadding = dp(28)
         val topPadding = dp(58)
         val bottomPadding = dp(42)
+        val fallbackTopInset = statusBarHeight()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(horizontalPadding, topPadding, horizontalPadding, bottomPadding)
+            setPadding(
+                horizontalPadding,
+                topPadding + fallbackTopInset,
+                horizontalPadding,
+                bottomPadding
+            )
             setBackgroundColor(incomingPage)
         }
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val system = insets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
-            )
+            val types = WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            val system = insets.getInsets(types)
+            val stable = insets.getInsetsIgnoringVisibility(types)
             view.setPadding(
-                horizontalPadding + system.left,
-                topPadding + system.top,
-                horizontalPadding + system.right,
-                bottomPadding + system.bottom
+                horizontalPadding + maxOf(system.left, stable.left),
+                topPadding + maxOf(system.top, stable.top, fallbackTopInset),
+                horizontalPadding + maxOf(system.right, stable.right),
+                bottomPadding + maxOf(system.bottom, stable.bottom)
             )
             insets
         }
-        ViewCompat.requestApplyInsets(root)
         root.addView(TextView(this).apply {
             text = "Tvoice"
             textSize = 16f
@@ -141,6 +146,7 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
         actions.addView(callAction(R.drawable.ic_call, green, t("Ответить", "Ҷавоб додан")) { answer() }, LinearLayout.LayoutParams(0, dp(124), 1f))
         root.addView(actions, LinearLayout.LayoutParams(-1, dp(124)))
         setContentView(root)
+        root.post { ViewCompat.requestApplyInsets(root) }
     }
 
     private fun answer() {
@@ -192,6 +198,11 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    @Suppress("DiscouragedApi")
+    private fun statusBarHeight(): Int {
+        val resourceId = resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (resourceId > 0) resources.getDimensionPixelSize(resourceId) else dp(24)
+    }
     private fun t(russian: String, tajik: String): String =
         if (getSharedPreferences("tvoice", MODE_PRIVATE).getString("language", "ru") == "tg") tajik else russian
 
