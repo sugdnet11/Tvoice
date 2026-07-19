@@ -3,6 +3,17 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val signingStoreFile = System.getenv("TVOICE_SIGNING_STORE_FILE")
+val signingStorePassword = System.getenv("TVOICE_SIGNING_STORE_PASSWORD")
+val signingKeyAlias = System.getenv("TVOICE_SIGNING_KEY_ALIAS")
+val signingKeyPassword = System.getenv("TVOICE_SIGNING_KEY_PASSWORD")
+val hasPermanentSigning = listOf(
+    signingStoreFile,
+    signingStorePassword,
+    signingKeyAlias,
+    signingKeyPassword
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "tj.tvoice.app"
     compileSdk = 35
@@ -11,13 +22,28 @@ android {
         applicationId = "tj.tvoice.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.7.0"
+        versionCode = 9
+        versionName = "0.8.1"
+    }
+
+    signingConfigs {
+        if (hasPermanentSigning) {
+            create("tvoicePermanent") {
+                storeFile = file(checkNotNull(signingStoreFile))
+                storePassword = signingStorePassword
+                keyAlias = signingKeyAlias
+                keyPassword = signingKeyPassword
+            }
+        }
     }
 
     buildTypes {
+        debug {
+            if (hasPermanentSigning) signingConfig = signingConfigs.getByName("tvoicePermanent")
+        }
         release {
             isMinifyEnabled = false
+            if (hasPermanentSigning) signingConfig = signingConfigs.getByName("tvoicePermanent")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

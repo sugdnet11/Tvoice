@@ -21,6 +21,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -42,6 +45,8 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     private val callHistory = mutableListOf<HistoryItem>()
     private var homePage = HomePage.Calls
     private var currentChatPeer: String? = null
+    private var connectedAtMillis: Long? = null
+    private var activeHistoryItem: HistoryItem? = null
 
     private val blue = Color.rgb(26, 76, 221)
     private val dark: Int get() = if (isDarkTheme) Color.rgb(241, 245, 249) else Color.rgb(10, 33, 74)
@@ -51,6 +56,8 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     private val page: Int get() = if (isDarkTheme) Color.rgb(11, 18, 32) else Color.rgb(247, 249, 252)
     private val surface: Int get() = if (isDarkTheme) Color.rgb(25, 36, 55) else Color.WHITE
     private val incomingPage = Color.rgb(239, 245, 255)
+    private val callPageTop: Int get() = if (isDarkTheme) Color.rgb(20, 36, 61) else Color.rgb(229, 239, 255)
+    private val callPageBottom: Int get() = if (isDarkTheme) Color.rgb(11, 24, 43) else Color.rgb(248, 251, 255)
     private val line: Int get() = if (isDarkTheme) Color.rgb(51, 65, 85) else Color.rgb(224, 230, 239)
     private val muted: Int get() = if (isDarkTheme) Color.rgb(148, 163, 184) else Color.rgb(100, 116, 139)
 
@@ -60,7 +67,12 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
 
     private enum class HomePage { Contacts, Calls, Chat }
 
-    data class HistoryItem(val number: String, val direction: String, val time: String)
+    data class HistoryItem(
+        val number: String,
+        val direction: String,
+        val time: String,
+        var durationSeconds: Long = 0
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val savedTheme = getSharedPreferences("tvoice", MODE_PRIVATE).getString("theme", "light")
@@ -68,10 +80,12 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             if (savedTheme == "dark") AppCompatDelegate.MODE_NIGHT_YES else AppCompatDelegate.MODE_NIGHT_NO
         )
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         TvoiceRuntime.initialize(this)
         TvoiceRuntime.addObserver(this)
         applySystemTheme()
         profileUri = preferences.getString("profile_uri", null)?.let(Uri::parse)
+        loadCallHistory()
         renderRuntimeState()
     }
 
@@ -122,6 +136,14 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
 
     private fun createShell(showNavigation: Boolean = true) {
         rootContainer = FrameLayout(this).apply { setBackgroundColor(page) }
+        ViewCompat.setOnApplyWindowInsetsListener(rootContainer) { view, insets ->
+            val system = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.setPadding(system.left, system.top, system.right, system.bottom)
+            insets
+        }
+        ViewCompat.requestApplyInsets(rootContainer)
         shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(page)
@@ -320,10 +342,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         }
         val call = iconCircle(R.drawable.ic_call, green, Color.WHITE) {
             if (dialedNumber.isBlank()) toast(t("Введите номер", "Рақамро ворид кунед"))
-            else try {
-                callHistory.add(0, HistoryItem(dialedNumber, "Исходящий", now()))
-                sip.call(dialedNumber)
-            } catch (e: Exception) { toast(e.message ?: "Ошибка вызова") }
+            else placeCall(dialedNumber)
         }
         body.addView(call, LinearLayout.LayoutParams(dp(78), dp(78)).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(12) })
     }
@@ -356,38 +375,26 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         currentChatPeer = null
         createShell()
         val body = screen()
-        val titleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val callsTitle = heading(titleRow, t("Звонки", "Зангҳо"), 27, dark, 0)
-        callsTitle.layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-        val dial = Button(this).apply {
-            text = t("Набрать", "Рақамгирӣ")
-            textSize = 13f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            stateListAnimator = null
-            background = rounded(green, dp(14).toFloat())
-            setOnClickListener { showDialer() }
-        }
-        titleRow.addView(dial, LinearLayout.LayoutParams(dp(112), dp(44)))
-        body.addView(titleRow, LinearLayout.LayoutParams(-1, -2))
+        heading(body, t("Звонки", "Зангҳо"), 27, dark, 0)
         sub(body, t("История вызовов", "Таърихи зангҳо"), 14, muted, 5)
         if (callHistory.isEmpty()) {
             emptyState(
                 body,
                 R.drawable.ic_history,
                 t("История пока пуста", "Таърих ҳоло холӣ аст"),
-                t("Нажмите «Набрать», чтобы позвонить", "Барои занг задан «Рақамгирӣ»-ро пахш кунед")
+                t("Нажмите кнопку клавиатуры, чтобы позвонить", "Барои занг задан тугмаи рақамгириро пахш кунед")
             )
         } else {
             callHistory.forEach { item ->
                 listCard(
                     body,
                     item.number,
-                    "${if (item.direction == "Входящий") t("Входящий", "Воридотӣ") else t("Исходящий", "Содиротӣ")} • ${item.time}",
+                    "${if (item.direction == "Входящий") t("Входящий", "Воридотӣ") else t("Исходящий", "Содиротӣ")} • ${item.time} • ${formatDuration(item.durationSeconds)}",
                     if (item.direction == "Входящий") green else blue
                 ) { dialedNumber = item.number; showDialer() }
             }
         }
+        addDialFab()
     }
 
     private fun showContacts() {
@@ -403,7 +410,145 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         }
         val contacts = loadContacts()
         if (contacts.isEmpty()) emptyState(body, R.drawable.ic_contacts, t("Контакты не найдены", "Тамосҳо ёфт нашуданд"), t("Добавьте контакт в телефонную книгу", "Ба дафтари телефон тамос илова кунед"))
-        else contacts.forEach { (name, phone) -> listCard(body, name, phone, cyan) { dialedNumber = phone.filter { it.isDigit() || it == '+' }; showDialer() } }
+        else contacts.forEach { (name, phone) -> contactCard(body, name, phone) }
+    }
+
+    private fun contactCard(parent: LinearLayout, name: String, phone: String) {
+        val normalized = phone.filter { it.isDigit() || it == '+' }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(11), dp(10), dp(11))
+            background = rounded(surface, dp(17).toFloat(), line, 1)
+            setOnClickListener {
+                dialedNumber = normalized
+                showDialer()
+            }
+        }
+        val avatar = TextView(this).apply {
+            text = avatarSymbols(name, normalized)
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            background = rounded(cyan, dp(24).toFloat())
+        }
+        row.addView(avatar, LinearLayout.LayoutParams(dp(48), dp(48)))
+        val text = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(13), 0, dp(6), 0)
+        }
+        heading(text, name.ifBlank { normalized }, 16, dark, 0)
+        sub(text, normalized, 13, muted, 3)
+        row.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
+        val call = ImageView(this).apply {
+            setImageResource(R.drawable.ic_call)
+            setColorFilter(blue)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            contentDescription = t("Позвонить", "Занг задан")
+            background = rounded(if (isDarkTheme) Color.rgb(30, 58, 110) else Color.rgb(237, 243, 255), dp(22).toFloat())
+            setOnClickListener { placeCall(normalized) }
+        }
+        row.addView(call, LinearLayout.LayoutParams(dp(44), dp(44)))
+        parent.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(9) })
+    }
+
+    private fun addDialFab() {
+        val button = ImageView(this).apply {
+            setImageResource(R.drawable.ic_dialpad)
+            setColorFilter(Color.WHITE)
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            contentDescription = t("Открыть набор номера", "Кушодани рақамгирӣ")
+            background = rounded(blue, dp(30).toFloat())
+            elevation = dp(9).toFloat()
+            setOnClickListener { showDialer() }
+        }
+        rootContainer.addView(
+            button,
+            FrameLayout.LayoutParams(dp(60), dp(60), Gravity.END or Gravity.BOTTOM).apply {
+                rightMargin = dp(20)
+                bottomMargin = dp(92)
+            }
+        )
+    }
+
+    private fun placeCall(number: String) {
+        val normalized = number.filter { it.isDigit() || it == '+' }
+        if (normalized.isBlank()) {
+            toast(t("Номер контакта не указан", "Рақами тамос нишон дода нашудааст"))
+            return
+        }
+        try {
+            beginHistory(normalized, "Исходящий")
+            sip.call(normalized)
+        } catch (e: Exception) {
+            finishHistory()
+            toast(e.message ?: t("Ошибка вызова", "Хатои занг"))
+        }
+    }
+
+    private fun beginHistory(number: String, direction: String) {
+        if (activeHistoryItem != null) return
+        connectedAtMillis = null
+        HistoryItem(number, direction, now()).also {
+            activeHistoryItem = it
+            callHistory.add(0, it)
+        }
+        saveCallHistory()
+    }
+
+    private fun finishHistory() {
+        val item = activeHistoryItem ?: return
+        connectedAtMillis?.let { started ->
+            item.durationSeconds = ((System.currentTimeMillis() - started) / 1000L).coerceAtLeast(1L)
+        }
+        connectedAtMillis = null
+        activeHistoryItem = null
+        saveCallHistory()
+    }
+
+    private fun loadCallHistory() {
+        if (callHistory.isNotEmpty()) return
+        runCatching {
+            val source = preferences.getString("call_history", "[]").orEmpty()
+            val items = org.json.JSONArray(source)
+            for (index in 0 until items.length()) {
+                val item = items.getJSONObject(index)
+                callHistory += HistoryItem(
+                    number = item.optString("number"),
+                    direction = item.optString("direction"),
+                    time = item.optString("time"),
+                    durationSeconds = item.optLong("duration", 0L)
+                )
+            }
+        }
+    }
+
+    private fun saveCallHistory() {
+        runCatching {
+            val items = org.json.JSONArray()
+            callHistory.take(100).forEach { item ->
+                items.put(
+                    org.json.JSONObject()
+                        .put("number", item.number)
+                        .put("direction", item.direction)
+                        .put("time", item.time)
+                        .put("duration", item.durationSeconds)
+                )
+            }
+            preferences.edit().putString("call_history", items.toString()).apply()
+        }
+    }
+
+    private fun avatarSymbols(name: String, number: String): String {
+        val words = name.trim()
+            .split(Regex("\\s+"))
+            .filter { word -> word.any { it.isLetter() } }
+        if (words.size >= 2) {
+            return "${words[0].first { it.isLetter() }}${words[1].first { it.isLetter() }}".uppercase(Locale.getDefault())
+        }
+        val firstDigit = number.firstOrNull { it.isDigit() } ?: '•'
+        return "T$firstDigit"
     }
 
     private fun showChats() {
@@ -672,7 +817,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             muted,
             2
         )
-        sub(scrollBody, "Tvoice 0.7.0 • Tvoice SIP Core 1.3", 12, blue, 7)
+        sub(scrollBody, "Tvoice 0.8.1 • Tvoice SIP Core 1.3", 12, blue, 7)
         sub(scrollBody, "Developed by Шогирдои Малем", 12, dark, 5).typeface = Typeface.DEFAULT_BOLD
         compactButton(scrollBody, t("Выйти из аккаунта", "Баромадан аз ҳисоб"), red) {
             sip.logout()
@@ -795,11 +940,15 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
 
     private fun showCall(remote: String, state: String) {
         createShell(false)
-        val body = screen(false).apply { gravity = Gravity.CENTER_HORIZONTAL; setBackgroundColor(blue); setPadding(dp(24), dp(42), dp(24), dp(30)) }
-        val avatar = TextView(this).apply { text = remote.take(2); textSize = 32f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; typeface = Typeface.DEFAULT_BOLD; background = rounded(cyan, dp(42).toFloat()) }
+        val body = screen(false).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(callPageTop, callPageBottom))
+            setPadding(dp(24), dp(42), dp(24), dp(30))
+        }
+        val avatar = TextView(this).apply { text = avatarSymbols("", remote); textSize = 28f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; typeface = Typeface.DEFAULT_BOLD; background = rounded(blue, dp(42).toFloat()) }
         body.addView(avatar, LinearLayout.LayoutParams(dp(84), dp(84)))
-        heading(body, remote, 38, Color.WHITE, 22)
-        sub(body, state, 17, Color.rgb(155, 235, 255), 8)
+        heading(body, remote, 38, dark, 22)
+        sub(body, state, 17, if (isDarkTheme) cyan else Color.rgb(47, 107, 219), 8)
         val spacer = Space(this); body.addView(spacer, LinearLayout.LayoutParams(1, 0, 1f))
         val keypad = callKeypad().apply { visibility = View.GONE }
         body.addView(keypad, LinearLayout.LayoutParams(-1, dp(230)))
@@ -841,7 +990,13 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
 
     override fun onCall(state: CallState, remote: String, message: String) = runOnUiThread {
         if (state == CallState.IncomingReceived) {
-            callHistory.add(0, HistoryItem(remote, "Входящий", now()))
+            beginHistory(remote, "Входящий")
+        }
+        if ((state == CallState.Connected || state == CallState.StreamsRunning) && connectedAtMillis == null) {
+            connectedAtMillis = System.currentTimeMillis()
+        }
+        if (state == CallState.End || state == CallState.Error || state == CallState.Released) {
+            finishHistory()
         }
         if (!TvoiceRuntime.isMainUiVisible) return@runOnUiThread
         when (state) {
@@ -939,8 +1094,8 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         columnCount = 3; rowCount = 4; alignmentMode = GridLayout.ALIGN_BOUNDS; useDefaultMargins = true
         listOf("1","2","3","4","5","6","7","8","9","*","0","#").forEach { digit ->
             val key = TextView(this@MainActivity).apply {
-                text = digit; textSize = 22f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
-                background = rounded(Color.argb(38,255,255,255), dp(24).toFloat()); setOnClickListener { sip.sendDtmf(digit[0]) }
+                text = digit; textSize = 22f; setTextColor(dark); gravity = Gravity.CENTER
+                background = rounded(surface, dp(24).toFloat(), line, 1); setOnClickListener { sip.sendDtmf(digit[0]) }
             }
             addView(key, GridLayout.LayoutParams().apply { width = dp(64); height = dp(48); columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f) })
         }
@@ -949,14 +1104,15 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     private fun toggleCallControl(icon: Int, activeIcon: Int, label: String, action: () -> Boolean) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
         val image = ImageView(this@MainActivity).apply {
-            setImageResource(icon); setColorFilter(Color.WHITE); setPadding(dp(16), dp(16), dp(16), dp(16)); background = rounded(Color.argb(42,255,255,255), dp(30).toFloat())
+            setImageResource(icon); setColorFilter(blue); setPadding(dp(16), dp(16), dp(16), dp(16)); background = rounded(surface, dp(30).toFloat(), line, 1)
             setOnClickListener {
                 val selected = action(); setImageResource(if (selected) activeIcon else icon)
-                background = rounded(if (selected) Color.argb(105, 5, 20, 70) else Color.argb(42,255,255,255), dp(30).toFloat())
+                setColorFilter(if (selected) Color.WHITE else blue)
+                background = rounded(if (selected) blue else surface, dp(30).toFloat(), line, 1)
             }
         }
         addView(image, LinearLayout.LayoutParams(dp(60), dp(60)))
-        addView(TextView(this@MainActivity).apply { text = label; textSize = 12f; gravity = Gravity.CENTER; setTextColor(Color.WHITE) }, LinearLayout.LayoutParams(-1, dp(30)))
+        addView(TextView(this@MainActivity).apply { text = label; textSize = 12f; gravity = Gravity.CENTER; setTextColor(dark) }, LinearLayout.LayoutParams(-1, dp(30)))
     }
 
     private fun incomingAction(icon: Int, color: Int, label: String, action: () -> Unit) = LinearLayout(this).apply {
@@ -999,7 +1155,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(15), dp(13), dp(15), dp(13))
             background = rounded(surface, dp(16).toFloat(), line, 1); setOnClickListener { action() }
         }
-        val dot = TextView(this).apply { text = title.take(1).uppercase(); textSize = 18f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; typeface = Typeface.DEFAULT_BOLD; background = rounded(accent, dp(23).toFloat()) }
+        val dot = TextView(this).apply { text = avatarSymbols(title, title); textSize = 16f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; typeface = Typeface.DEFAULT_BOLD; background = rounded(accent, dp(23).toFloat()) }
         row.addView(dot, LinearLayout.LayoutParams(dp(46), dp(46)))
         val text = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(13), 0, 0, 0) }
         heading(text, title, 17, dark, 0); sub(text, detail, 13, muted, 3)
@@ -1064,13 +1220,20 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     private fun applySystemTheme() {
         window.statusBarColor = surface
         window.navigationBarColor = page
-        @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility = if (isDarkTheme) 0 else {
-            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = !isDarkTheme
+            isAppearanceLightNavigationBars = !isDarkTheme
         }
     }
 
     private fun t(russian: String, tajik: String): String = if (isTajik) tajik else russian
+    private fun formatDuration(seconds: Long): String {
+        val hours = seconds / 3600
+        val minutes = (seconds % 3600) / 60
+        val secs = seconds % 60
+        return if (hours > 0) "%d:%02d:%02d".format(Locale.getDefault(), hours, minutes, secs)
+        else "%02d:%02d".format(Locale.getDefault(), minutes, secs)
+    }
     private fun formatTime(timestamp: Long) = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
     private fun now() = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()

@@ -14,6 +14,9 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.Space
 import android.widget.TextView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 
 /** Lock-screen-safe incoming call screen, launched by the native CallStyle notification. */
 class IncomingCallActivity : Activity(), SipManager.Observer {
@@ -27,6 +30,11 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = true
+            isAppearanceLightNavigationBars = true
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -69,12 +77,28 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
     }
 
     private fun render() {
+        val horizontalPadding = dp(28)
+        val topPadding = dp(58)
+        val bottomPadding = dp(42)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(28), dp(58), dp(28), dp(42))
+            setPadding(horizontalPadding, topPadding, horizontalPadding, bottomPadding)
             setBackgroundColor(incomingPage)
         }
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val system = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.setPadding(
+                horizontalPadding + system.left,
+                topPadding + system.top,
+                horizontalPadding + system.right,
+                bottomPadding + system.bottom
+            )
+            insets
+        }
+        ViewCompat.requestApplyInsets(root)
         root.addView(TextView(this).apply {
             text = "Tvoice"
             textSize = 16f
