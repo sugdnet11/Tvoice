@@ -117,7 +117,7 @@ class TvoiceCallService : Service(), SipManager.Observer {
             }
             CallState.Connected, CallState.StreamsRunning, CallState.Paused -> {
                 stopManualRingtone()
-                showOngoingCall(remote, message)
+                showOngoingCall(remote, onHold = state == CallState.Paused)
             }
             CallState.End, CallState.Error, CallState.Released -> {
                 stopManualRingtone()
@@ -198,7 +198,7 @@ class TvoiceCallService : Service(), SipManager.Observer {
             .setImportant(true)
             .setIcon(Icon.createWithResource(this, R.drawable.ic_account))
             .build()
-        val builder = Notification.Builder(this, CALL_CHANNEL)
+        val builder = Notification.Builder(this, INCOMING_CALL_CHANNEL)
             .setSmallIcon(R.drawable.ic_call)
             .setContentTitle("Входящий звонок")
             .setContentText(remote)
@@ -239,7 +239,7 @@ class TvoiceCallService : Service(), SipManager.Observer {
         manualRingtone = null
     }
 
-    private fun showOngoingCall(remote: String, message: String) {
+    private fun showOngoingCall(remote: String, onHold: Boolean) {
         val hangup = servicePendingIntent(20, ACTION_HANGUP)
         val open = PendingIntent.getActivity(
             this,
@@ -248,14 +248,15 @@ class TvoiceCallService : Service(), SipManager.Observer {
             immutableUpdateFlags()
         )
         val person = Person.Builder().setName(remote).setImportant(true).build()
-        val builder = Notification.Builder(this, CALL_CHANNEL)
+        val builder = Notification.Builder(this, ACTIVE_CALL_CHANNEL)
             .setSmallIcon(R.drawable.ic_call)
             .setContentTitle(remote)
-            .setContentText(message.ifBlank { "Разговор" })
+            .setContentText(if (onHold) "Звонок на удержании" else "Активный звонок")
             .setContentIntent(open)
             .setCategory(Notification.CATEGORY_CALL)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .setColor(Color.rgb(26, 76, 221))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder.setStyle(Notification.CallStyle.forOngoingCall(person, hangup))
@@ -263,8 +264,8 @@ class TvoiceCallService : Service(), SipManager.Observer {
             builder.addAction(Notification.Action.Builder(R.drawable.ic_call_end, "Завершить", hangup).build())
         }
         val notification = builder.build()
-        notificationManager().notify(CALL_NOTIFICATION_ID, notification)
-        startTypedForeground(serviceNotification("$remote • активный звонок"), callAudio = true)
+        notificationManager().cancel(CALL_NOTIFICATION_ID)
+        startTypedForeground(notification, callAudio = true)
     }
 
     private fun startTypedForeground(notification: Notification, callAudio: Boolean) {
@@ -297,7 +298,7 @@ class TvoiceCallService : Service(), SipManager.Observer {
             setShowBadge(false)
         }
         val calls = NotificationChannel(
-            CALL_CHANNEL,
+            INCOMING_CALL_CHANNEL,
             "Входящие звонки",
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
@@ -310,6 +311,17 @@ class TvoiceCallService : Service(), SipManager.Observer {
                 AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).build()
             )
         }
+        val activeCalls = NotificationChannel(
+            ACTIVE_CALL_CHANNEL,
+            "Активные звонки",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Текущий разговор Tvoice"
+            setSound(null, null)
+            enableVibration(false)
+            setShowBadge(false)
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        }
         val chats = NotificationChannel(
             CHAT_CHANNEL,
             "Сообщения Tvoice",
@@ -318,7 +330,7 @@ class TvoiceCallService : Service(), SipManager.Observer {
             description = "Новые сообщения от SIP-абонентов"
             enableVibration(true)
         }
-        notificationManager().createNotificationChannels(listOf(service, calls, chats))
+        notificationManager().createNotificationChannels(listOf(service, calls, activeCalls, chats))
     }
 
     private fun notificationManager(): NotificationManager = getSystemService(NotificationManager::class.java)
@@ -333,7 +345,8 @@ class TvoiceCallService : Service(), SipManager.Observer {
         const val ACTION_HANGUP = "tj.tvoice.app.action.HANGUP"
 
         private const val SERVICE_CHANNEL = "tvoice_service_v1"
-        private const val CALL_CHANNEL = "tvoice_calls_v1"
+        const val INCOMING_CALL_CHANNEL = "tvoice_calls_v1"
+        private const val ACTIVE_CALL_CHANNEL = "tvoice_active_calls_v1"
         private const val CHAT_CHANNEL = "tvoice_messages_v1"
         private const val SERVICE_NOTIFICATION_ID = 5101
         private const val CALL_NOTIFICATION_ID = 5102

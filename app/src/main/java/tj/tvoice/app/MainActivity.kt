@@ -386,15 +386,55 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             )
         } else {
             callHistory.forEach { item ->
-                listCard(
-                    body,
-                    item.number,
-                    "${if (item.direction == "Входящий") t("Входящий", "Воридотӣ") else t("Исходящий", "Содиротӣ")} • ${item.time} • ${formatDuration(item.durationSeconds)}",
-                    if (item.direction == "Входящий") green else blue
-                ) { dialedNumber = item.number; showDialer() }
+                historyCard(body, item)
             }
         }
         addDialFab()
+    }
+
+    private fun historyCard(parent: LinearLayout, item: HistoryItem) {
+        val accent = if (item.direction == "Входящий") green else blue
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(12), dp(13), dp(12))
+            background = rounded(surface, dp(17).toFloat(), line, 1)
+            setOnClickListener {
+                dialedNumber = item.number
+                showDialer()
+            }
+        }
+        val avatar = TextView(this).apply {
+            text = avatarSymbols(item.number, item.number)
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            background = rounded(accent, dp(24).toFloat())
+        }
+        row.addView(avatar, LinearLayout.LayoutParams(dp(48), dp(48)))
+        val info = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(13), 0, dp(10), 0)
+        }
+        heading(info, item.number, 16, dark, 0)
+        sub(
+            info,
+            "${if (item.direction == "Входящий") t("Входящий", "Воридотӣ") else t("Исходящий", "Содиротӣ")} • ${item.time}",
+            13,
+            muted,
+            3
+        )
+        row.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(View(this).apply { setBackgroundColor(line) }, LinearLayout.LayoutParams(dp(1), dp(34)))
+        row.addView(TextView(this).apply {
+            text = formatDuration(item.durationSeconds)
+            textSize = 14f
+            setTextColor(blue)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        }, LinearLayout.LayoutParams(dp(64), dp(48)).apply { leftMargin = dp(10) })
+        parent.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(9) })
     }
 
     private fun showContacts() {
@@ -794,6 +834,18 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         compactSection(scrollBody, t("Настройки", "Танзимот"))
         compactSetting(
             scrollBody,
+            t("Звук звонка", "Овози занг"),
+            t("Мелодия и вибрация", "Оҳанг ва ларзиш"),
+            blue
+        ) { openIncomingCallSoundSettings() }
+        compactSetting(
+            scrollBody,
+            t("Уведомления", "Огоҳиномаҳо"),
+            if (notificationsEnabled()) t("Включены", "Фаъол") else t("Выключены", "Хомӯш"),
+            if (notificationsEnabled()) green else red
+        ) { openNotificationSettings() }
+        compactSetting(
+            scrollBody,
             t("Язык", "Забон"),
             if (isTajik) "Тоҷикӣ" else "Русский",
             blue
@@ -817,7 +869,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             muted,
             2
         )
-        sub(scrollBody, "Tvoice 0.8.1 • Tvoice SIP Core 1.3", 12, blue, 7)
+        sub(scrollBody, "Tvoice 0.8.2 • Tvoice SIP Core 1.3", 12, blue, 7)
         sub(scrollBody, "Developed by Шогирдои Малем", 12, dark, 5).typeface = Typeface.DEFAULT_BOLD
         compactButton(scrollBody, t("Выйти из аккаунта", "Баромадан аз ҳисоб"), red) {
             sip.logout()
@@ -885,6 +937,30 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             .show()
     }
 
+    private fun notificationsEnabled(): Boolean =
+        getSystemService(NotificationManager::class.java).areNotificationsEnabled()
+
+    private fun openNotificationSettings() {
+        val settings = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+            putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+        }
+        runCatching { startActivity(settings) }
+            .onFailure { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
+    }
+
+    private fun openIncomingCallSoundSettings() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val settings = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                putExtra(Settings.EXTRA_CHANNEL_ID, TvoiceCallService.INCOMING_CALL_CHANNEL)
+            }
+            runCatching { startActivity(settings) }
+                .onFailure { openNotificationSettings() }
+        } else {
+            openNotificationSettings()
+        }
+    }
+
     private fun showThemeDialog() {
         val values = arrayOf(t("Светлая", "Равшан"), t("Тёмная", "Торик"))
         AlertDialog.Builder(this)
@@ -940,29 +1016,55 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
 
     private fun showCall(remote: String, state: String) {
         createShell(false)
+        val screenHeight = resources.configuration.screenHeightDp
+        val screenWidth = resources.configuration.screenWidthDp
+        val veryCompact = screenHeight < 630
+        val compact = screenHeight < 740
+        val horizontalPadding = if (screenWidth < 360) 14 else if (compact) 18 else 24
+        val verticalPadding = if (veryCompact) 12 else if (compact) 20 else 30
+        val primarySize = if (veryCompact) 64 else if (compact) 72 else 80
+        val rowHeight = if (veryCompact) 72 else if (compact) 84 else 98
+        val keypadHeight = if (veryCompact) 164 else if (compact) 196 else 230
         val body = screen(false).apply {
             gravity = Gravity.CENTER_HORIZONTAL
             background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(callPageTop, callPageBottom))
-            setPadding(dp(24), dp(42), dp(24), dp(30))
+            setPadding(dp(horizontalPadding), dp(verticalPadding), dp(horizontalPadding), dp(verticalPadding))
         }
-        val avatar = TextView(this).apply { text = avatarSymbols("", remote); textSize = 28f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; typeface = Typeface.DEFAULT_BOLD; background = rounded(blue, dp(42).toFloat()) }
-        body.addView(avatar, LinearLayout.LayoutParams(dp(84), dp(84)))
-        heading(body, remote, 38, dark, 22)
-        sub(body, state, 17, if (isDarkTheme) cyan else Color.rgb(47, 107, 219), 8)
+        val avatar = TextView(this).apply {
+            text = avatarSymbols("", remote)
+            textSize = if (veryCompact) 22f else 26f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            background = rounded(blue, dp(primarySize / 2).toFloat())
+        }
+        body.addView(avatar, LinearLayout.LayoutParams(dp(primarySize), dp(primarySize)))
+        heading(body, remote, if (veryCompact) 30 else if (compact) 34 else 38, dark, if (compact) 14 else 20)
+        sub(body, state, if (veryCompact) 14 else 16, if (isDarkTheme) cyan else Color.rgb(47, 107, 219), 6)
         val spacer = Space(this); body.addView(spacer, LinearLayout.LayoutParams(1, 0, 1f))
-        val keypad = callKeypad().apply { visibility = View.GONE }
-        body.addView(keypad, LinearLayout.LayoutParams(-1, dp(230)))
+        val keypad = callKeypad(compact).apply { visibility = View.GONE }
+        body.addView(keypad, LinearLayout.LayoutParams(-1, dp(keypadHeight)))
         val firstRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
-        firstRow.addView(toggleCallControl(R.drawable.ic_mic, R.drawable.ic_mic_off, t("Микрофон", "Микрофон")) { sip.toggleMute() }, LinearLayout.LayoutParams(0, dp(98), 1f))
-        firstRow.addView(toggleCallControl(R.drawable.ic_dialpad, R.drawable.ic_dialpad, t("Клавиатура", "Тугмаҳо")) { keypad.visibility = if (keypad.visibility == View.VISIBLE) View.GONE else View.VISIBLE; keypad.visibility == View.VISIBLE }, LinearLayout.LayoutParams(0, dp(98), 1f))
-        firstRow.addView(toggleCallControl(R.drawable.ic_speaker, R.drawable.ic_speaker_off, t("Динамик", "Баландгӯяк")) { sip.toggleSpeaker() }, LinearLayout.LayoutParams(0, dp(98), 1f))
-        body.addView(firstRow, LinearLayout.LayoutParams(-1, dp(102)))
+        firstRow.addView(toggleCallControl(R.drawable.ic_mic, R.drawable.ic_mic_off, t("Микрофон", "Микрофон"), compact) { sip.toggleMute() }, LinearLayout.LayoutParams(0, dp(rowHeight), 1f))
+        firstRow.addView(toggleCallControl(R.drawable.ic_dialpad, R.drawable.ic_dialpad, t("Клавиатура", "Тугмаҳо"), compact) { keypad.visibility = if (keypad.visibility == View.VISIBLE) View.GONE else View.VISIBLE; keypad.visibility == View.VISIBLE }, LinearLayout.LayoutParams(0, dp(rowHeight), 1f))
+        firstRow.addView(toggleCallControl(R.drawable.ic_speaker, R.drawable.ic_speaker_off, t("Динамик", "Баландгӯяк"), compact) { sip.toggleSpeaker() }, LinearLayout.LayoutParams(0, dp(rowHeight), 1f))
+        body.addView(firstRow, LinearLayout.LayoutParams(-1, dp(rowHeight)))
         val secondRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
-        secondRow.addView(toggleCallControl(R.drawable.ic_pause, R.drawable.ic_play, t("Удержание", "Нигоҳдорӣ")) { sip.toggleHold() }, LinearLayout.LayoutParams(0, dp(98), 1f))
-        secondRow.addView(toggleCallControl(R.drawable.ic_group_add, R.drawable.ic_group_add, t("Конференция", "Конфронс")) { showConferenceDialog(); true }, LinearLayout.LayoutParams(0, dp(98), 1f))
-        body.addView(secondRow, LinearLayout.LayoutParams(-1, dp(102)))
-        val end = iconCircle(R.drawable.ic_call_end, red, Color.WHITE) { sip.hangup() }
-        body.addView(end, LinearLayout.LayoutParams(dp(78), dp(78)).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(12) })
+        secondRow.addView(toggleCallControl(R.drawable.ic_pause, R.drawable.ic_play, t("Удержание", "Нигоҳдорӣ"), compact) { sip.toggleHold() }, LinearLayout.LayoutParams(0, dp(rowHeight), 1f))
+        secondRow.addView(toggleCallControl(R.drawable.ic_group_add, R.drawable.ic_group_add, t("Конференция", "Конфронс"), compact) { showConferenceDialog(); true }, LinearLayout.LayoutParams(0, dp(rowHeight), 1f))
+        body.addView(secondRow, LinearLayout.LayoutParams(-1, dp(rowHeight)))
+        val end = ImageView(this).apply {
+            setImageResource(R.drawable.ic_call_end)
+            setColorFilter(Color.WHITE)
+            setPadding(dp(if (compact) 18 else 21), dp(if (compact) 18 else 21), dp(if (compact) 18 else 21), dp(if (compact) 18 else 21))
+            background = rounded(red, dp(primarySize / 2).toFloat(), line, 1)
+            elevation = dp(3).toFloat()
+            setOnClickListener { sip.hangup() }
+        }
+        body.addView(end, LinearLayout.LayoutParams(dp(primarySize), dp(primarySize)).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            topMargin = dp(if (veryCompact) 4 else 8)
+        })
     }
 
     override fun onRegistration(state: RegistrationState, message: String) = runOnUiThread {
@@ -1090,29 +1192,31 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             }.show()
     }
 
-    private fun callKeypad(): GridLayout = GridLayout(this).apply {
+    private fun callKeypad(compact: Boolean): GridLayout = GridLayout(this).apply {
         columnCount = 3; rowCount = 4; alignmentMode = GridLayout.ALIGN_BOUNDS; useDefaultMargins = true
         listOf("1","2","3","4","5","6","7","8","9","*","0","#").forEach { digit ->
             val key = TextView(this@MainActivity).apply {
-                text = digit; textSize = 22f; setTextColor(dark); gravity = Gravity.CENTER
-                background = rounded(surface, dp(24).toFloat(), line, 1); setOnClickListener { sip.sendDtmf(digit[0]) }
+                text = digit; textSize = if (compact) 19f else 22f; setTextColor(dark); gravity = Gravity.CENTER
+                background = rounded(surface, dp(if (compact) 20 else 24).toFloat(), line, 1); setOnClickListener { sip.sendDtmf(digit[0]) }
             }
-            addView(key, GridLayout.LayoutParams().apply { width = dp(64); height = dp(48); columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f) })
+            addView(key, GridLayout.LayoutParams().apply { width = dp(if (compact) 54 else 64); height = dp(if (compact) 40 else 48); columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f) })
         }
     }
 
-    private fun toggleCallControl(icon: Int, activeIcon: Int, label: String, action: () -> Boolean) = LinearLayout(this).apply {
+    private fun toggleCallControl(icon: Int, activeIcon: Int, label: String, compact: Boolean, action: () -> Boolean) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+        val controlSize = if (compact) 52 else 60
+        val iconPadding = if (compact) 14 else 16
         val image = ImageView(this@MainActivity).apply {
-            setImageResource(icon); setColorFilter(blue); setPadding(dp(16), dp(16), dp(16), dp(16)); background = rounded(surface, dp(30).toFloat(), line, 1)
+            setImageResource(icon); setColorFilter(blue); setPadding(dp(iconPadding), dp(iconPadding), dp(iconPadding), dp(iconPadding)); background = rounded(surface, dp(controlSize / 2).toFloat(), line, 1)
             setOnClickListener {
                 val selected = action(); setImageResource(if (selected) activeIcon else icon)
                 setColorFilter(if (selected) Color.WHITE else blue)
                 background = rounded(if (selected) blue else surface, dp(30).toFloat(), line, 1)
             }
         }
-        addView(image, LinearLayout.LayoutParams(dp(60), dp(60)))
-        addView(TextView(this@MainActivity).apply { text = label; textSize = 12f; gravity = Gravity.CENTER; setTextColor(dark) }, LinearLayout.LayoutParams(-1, dp(30)))
+        addView(image, LinearLayout.LayoutParams(dp(controlSize), dp(controlSize)))
+        addView(TextView(this@MainActivity).apply { text = label; textSize = if (compact) 11f else 12f; gravity = Gravity.CENTER; setTextColor(dark) }, LinearLayout.LayoutParams(-1, dp(if (compact) 24 else 30)))
     }
 
     private fun incomingAction(icon: Int, color: Int, label: String, action: () -> Unit) = LinearLayout(this).apply {
