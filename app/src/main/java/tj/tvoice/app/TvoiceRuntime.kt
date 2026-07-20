@@ -104,6 +104,8 @@ object TvoiceRuntime : SipManager.Observer {
     fun toggleHold(): Boolean = requireManager().toggleHold()
     fun toggleMute(): Boolean = requireManager().toggleMute()
     fun toggleSpeaker(): Boolean = requireManager().toggleSpeaker()
+    fun isMuted(): Boolean = requireManager().isMuted()
+    fun isSpeakerEnabled(): Boolean = requireManager().isSpeakerEnabled()
     fun addToConference(number: String) = requireManager().addToConference(number)
     fun reconnectNetwork() {
         ChatStore.failSending()

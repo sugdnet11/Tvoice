@@ -11,8 +11,10 @@ import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.drawable.Icon
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.media.Ringtone
 import android.media.RingtoneManager
+import android.media.ToneGenerator
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
@@ -26,6 +28,8 @@ import android.os.VibratorManager
 /** Keeps SIP/UDP registration alive and exposes calls through Android's native call UI. */
 class TvoiceCallService : Service(), SipManager.Observer {
     private var manualRingtone: Ringtone? = null
+    private var ringbackTone: ToneGenerator? = null
+    private var ringbackPlaying = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var connectivityManager: ConnectivityManager
     @Volatile private var currentNetwork: Network? = null
@@ -84,6 +88,7 @@ class TvoiceCallService : Service(), SipManager.Observer {
 
     override fun onDestroy() {
         stopIncomingAlerts()
+        releaseRingbackTone()
         mainHandler.removeCallbacks(reconnectAfterNetworkChange)
         if (networkCallbackRegistered) {
             runCatching { connectivityManager.unregisterNetworkCallback(networkCallback) }
@@ -111,7 +116,10 @@ class TvoiceCallService : Service(), SipManager.Observer {
 
     override fun onCall(state: CallState, remote: String, message: String) {
         when (state) {
+            CallState.OutgoingInit -> stopRingbackTone()
+            CallState.OutgoingProgress, CallState.OutgoingRinging -> startRingbackTone()
             CallState.IncomingReceived -> {
+                stopRingbackTone()
                 stopIncomingAlerts()
                 startIncomingAlerts()
                 if (TvoiceRuntime.isMainUiVisible) {
@@ -121,10 +129,12 @@ class TvoiceCallService : Service(), SipManager.Observer {
                 }
             }
             CallState.Connected, CallState.StreamsRunning, CallState.Paused -> {
+                stopRingbackTone()
                 stopIncomingAlerts()
                 showOngoingCall(remote, onHold = state == CallState.Paused)
             }
             CallState.End, CallState.Error, CallState.Released -> {
+                stopRingbackTone()
                 stopIncomingAlerts()
                 notificationManager().cancel(CALL_NOTIFICATION_ID)
                 updateServiceNotification("${TvoiceRuntime.activeUsername} • в сети")
@@ -243,6 +253,30 @@ class TvoiceCallService : Service(), SipManager.Observer {
     private fun stopManualRingtone() {
         manualRingtone?.let { runCatching { it.stop() } }
         manualRingtone = null
+    }
+
+    @Synchronized
+    private fun startRingbackTone() {
+        if (ringbackPlaying) return
+        val tone = ringbackTone ?: runCatching {
+            ToneGenerator(AudioManager.STREAM_VOICE_CALL, 80)
+        }.getOrNull()?.also { ringbackTone = it } ?: return
+        ringbackPlaying = runCatching {
+            tone.startTone(ToneGenerator.TONE_SUP_RINGTONE)
+        }.getOrDefault(false)
+    }
+
+    @Synchronized
+    private fun stopRingbackTone() {
+        if (ringbackPlaying) runCatching { ringbackTone?.stopTone() }
+        ringbackPlaying = false
+    }
+
+    @Synchronized
+    private fun releaseRingbackTone() {
+        stopRingbackTone()
+        runCatching { ringbackTone?.release() }
+        ringbackTone = null
     }
 
     private fun startIncomingAlerts() {

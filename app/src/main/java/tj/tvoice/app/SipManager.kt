@@ -71,6 +71,8 @@ class SipManager(context: Context, private val observer: Observer) {
     fun toggleHold(): Boolean = core.toggleHold()
     fun toggleMute(): Boolean = core.toggleMute()
     fun toggleSpeaker(): Boolean = core.toggleSpeaker()
+    fun isMuted(): Boolean = core.isMuted()
+    fun isSpeakerEnabled(): Boolean = core.isSpeakerEnabled()
 
     fun addToConference(number: String) {
         throw IllegalStateException("Локальная конференция с $number будет включена после проверки нового Tvoice SIP Core")

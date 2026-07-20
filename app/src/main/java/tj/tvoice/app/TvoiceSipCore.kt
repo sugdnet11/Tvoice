@@ -217,6 +217,10 @@ internal class TvoiceSipCore(
         return speaker
     }
 
+    fun isMuted(): Boolean = muted
+
+    fun isSpeakerEnabled(): Boolean = speaker
+
     fun toggleHold(): Boolean {
         val call = dialog ?: return false
         if (!call.connected) return call.held

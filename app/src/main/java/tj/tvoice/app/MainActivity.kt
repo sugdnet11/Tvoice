@@ -626,20 +626,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         currentChatPeer = null
         createShell()
         val body = screen()
-        val titleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val chatTitle = heading(titleRow, t("Чат", "Чат"), 27, dark, 0)
-        chatTitle.layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-        val add = Button(this).apply {
-            text = t("Написать", "Навиштан")
-            textSize = 13f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            stateListAnimator = null
-            background = rounded(blue, dp(14).toFloat())
-            setOnClickListener { showNewChatDialog() }
-        }
-        titleRow.addView(add, LinearLayout.LayoutParams(dp(112), dp(44)))
-        body.addView(titleRow, LinearLayout.LayoutParams(-1, -2))
+        heading(body, t("Чат", "Чат"), 27, dark, 0)
         sub(body, t("Сообщения между абонентами Tvoice", "Паёмҳо байни муштариёни Tvoice"), 14, muted, 5)
         val conversations = ChatStore.conversations(ownNumber)
         if (conversations.isEmpty()) {
@@ -655,6 +642,27 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
                 listCard(body, chat.peer, "${chat.preview.take(45)}$unread", blue) { showConversation(chat.peer) }
             }
         }
+        body.addView(Space(this), LinearLayout.LayoutParams(1, dp(74)))
+        addNewChatFab()
+    }
+
+    private fun addNewChatFab() {
+        val button = ImageView(this).apply {
+            setImageResource(R.drawable.ic_chat)
+            setColorFilter(Color.WHITE)
+            setPadding(dp(17), dp(17), dp(17), dp(17))
+            contentDescription = t("Новый чат", "Чати нав")
+            background = rounded(blue, dp(30).toFloat())
+            elevation = dp(9).toFloat()
+            setOnClickListener { showNewChatDialog() }
+        }
+        content.addView(
+            button,
+            FrameLayout.LayoutParams(dp(60), dp(60), Gravity.END or Gravity.BOTTOM).apply {
+                rightMargin = dp(20)
+                bottomMargin = dp(18)
+            }
+        )
     }
 
     private fun showNewChatDialog() {
@@ -899,7 +907,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             muted,
             2
         )
-        sub(scrollBody, "Tvoice 0.8.4 • Tvoice SIP Core 1.3", 12, blue, 7)
+        sub(scrollBody, "Tvoice 0.8.5 • Tvoice SIP Core 1.3", 12, blue, 7)
         sub(scrollBody, "Developed by Шогирдои Малем", 12, dark, 5).typeface = Typeface.DEFAULT_BOLD
         compactButton(scrollBody, t("Выйти из аккаунта", "Баромадан аз ҳисоб"), red) {
             sip.logout()
@@ -1197,9 +1205,25 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         val keypad = callKeypad(compact).apply { visibility = View.GONE }
         body.addView(keypad, LinearLayout.LayoutParams(-1, dp(keypadHeight)))
         val firstRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
-        firstRow.addView(toggleCallControl(R.drawable.ic_mic, R.drawable.ic_mic_off, t("Микрофон", "Микрофон"), compact) { sip.toggleMute() }, LinearLayout.LayoutParams(0, dp(rowHeight), 1f))
+        firstRow.addView(toggleCallControl(
+            R.drawable.ic_mic,
+            R.drawable.ic_mic_off,
+            t("Микрофон", "Микрофон"),
+            compact,
+            initialSelected = sip.isMuted(),
+            selectedBackground = if (isDarkTheme) Color.rgb(71, 85, 105) else Color.rgb(226, 232, 240),
+            selectedIconColor = if (isDarkTheme) Color.rgb(203, 213, 225) else Color.rgb(71, 85, 105)
+        ) { sip.toggleMute() }, LinearLayout.LayoutParams(0, dp(rowHeight), 1f))
         firstRow.addView(toggleCallControl(R.drawable.ic_dialpad, R.drawable.ic_dialpad, t("Клавиатура", "Тугмаҳо"), compact) { keypad.visibility = if (keypad.visibility == View.VISIBLE) View.GONE else View.VISIBLE; keypad.visibility == View.VISIBLE }, LinearLayout.LayoutParams(0, dp(rowHeight), 1f))
-        firstRow.addView(toggleCallControl(R.drawable.ic_speaker, R.drawable.ic_speaker_off, t("Динамик", "Баландгӯяк"), compact) { sip.toggleSpeaker() }, LinearLayout.LayoutParams(0, dp(rowHeight), 1f))
+        firstRow.addView(toggleCallControl(
+            R.drawable.ic_speaker,
+            R.drawable.ic_speaker,
+            t("Динамик", "Баландгӯяк"),
+            compact,
+            initialSelected = sip.isSpeakerEnabled(),
+            selectedBackground = if (isDarkTheme) Color.rgb(49, 78, 132) else Color.rgb(219, 232, 255),
+            selectedIconColor = if (isDarkTheme) Color.rgb(147, 197, 253) else blue
+        ) { sip.toggleSpeaker() }, LinearLayout.LayoutParams(0, dp(rowHeight), 1f))
         body.addView(firstRow, LinearLayout.LayoutParams(-1, dp(rowHeight)))
         val secondRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         secondRow.addView(toggleCallControl(R.drawable.ic_pause, R.drawable.ic_play, t("Удержание", "Нигоҳдорӣ"), compact) { sip.toggleHold() }, LinearLayout.LayoutParams(0, dp(rowHeight), 1f))
@@ -1355,16 +1379,29 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         }
     }
 
-    private fun toggleCallControl(icon: Int, activeIcon: Int, label: String, compact: Boolean, action: () -> Boolean) = LinearLayout(this).apply {
+    private fun toggleCallControl(
+        icon: Int,
+        activeIcon: Int,
+        label: String,
+        compact: Boolean,
+        initialSelected: Boolean = false,
+        selectedBackground: Int = blue,
+        selectedIconColor: Int = Color.WHITE,
+        action: () -> Boolean
+    ) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
         val controlSize = if (compact) 52 else 60
         val iconPadding = if (compact) 14 else 16
         val image = ImageView(this@MainActivity).apply {
-            setImageResource(icon); setColorFilter(blue); setPadding(dp(iconPadding), dp(iconPadding), dp(iconPadding), dp(iconPadding)); background = rounded(surface, dp(controlSize / 2).toFloat(), line, 1)
+            fun display(selected: Boolean) {
+                setImageResource(if (selected) activeIcon else icon)
+                setColorFilter(if (selected) selectedIconColor else blue)
+                background = rounded(if (selected) selectedBackground else surface, dp(controlSize / 2).toFloat(), line, 1)
+            }
+            setPadding(dp(iconPadding), dp(iconPadding), dp(iconPadding), dp(iconPadding))
+            display(initialSelected)
             setOnClickListener {
-                val selected = action(); setImageResource(if (selected) activeIcon else icon)
-                setColorFilter(if (selected) Color.WHITE else blue)
-                background = rounded(if (selected) blue else surface, dp(30).toFloat(), line, 1)
+                display(action())
             }
         }
         addView(image, LinearLayout.LayoutParams(dp(controlSize), dp(controlSize)))
