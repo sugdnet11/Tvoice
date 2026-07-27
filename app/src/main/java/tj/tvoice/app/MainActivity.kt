@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.Typeface
@@ -22,14 +23,17 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.widget.doAfterTextChanged
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-class MainActivity : AppCompatActivity(), SipManager.Observer {
+class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observer {
     private val sip get() = TvoiceRuntime
     private lateinit var rootContainer: FrameLayout
     private lateinit var shell: LinearLayout
@@ -47,6 +51,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     private val callHistory = mutableListOf<HistoryItem>()
     private var homePage = HomePage.Calls
     private var currentChatPeer: String? = null
+    private var pendingChatAttachmentPeer = ""
     private var connectedAtMillis: Long? = null
     private var activeHistoryItem: HistoryItem? = null
 
@@ -85,6 +90,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         TvoiceRuntime.initialize(this)
         TvoiceRuntime.addObserver(this)
+        ChatClient.addObserver(this)
         applySystemTheme()
         profileUri = preferences.getString("profile_uri", null)?.let(Uri::parse)
         loadCallHistory()
@@ -327,6 +333,11 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
                 } else toast(t("Для звонков нужен доступ к микрофону", "Барои зангҳо дастрасӣ ба микрофон лозим аст"))
             }
             11 -> showContacts()
+            14 -> if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                showNewChatDialog()
+            } else {
+                toast(t("Разрешите доступ к контактам для выбора чата", "Барои интихоби чат дастрасӣ ба тамосҳоро иҷозат диҳед"))
+            }
             13 -> if (grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) {
                 toast(t(
                     "Android не разрешил уведомления. Их можно оставить включёнными в Tvoice и разрешить позже.",
@@ -621,13 +632,25 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         return "T$firstDigit"
     }
 
-    private fun showChats() {
+    private fun showChats(refresh: Boolean = true) {
         homePage = HomePage.Chat
         currentChatPeer = null
+        if (refresh) ChatClient.syncAll()
         createShell()
         val body = screen()
         heading(body, t("Чат", "Чат"), 27, dark, 0)
-        sub(body, t("Сообщения между абонентами Tvoice", "Паёмҳо байни муштариёни Tvoice"), 14, muted, 5)
+        val chatStatus = if (ChatClient.isConnected) {
+            t("В сети", "Дар шабака")
+        } else {
+            ChatClient.stateMessage.ifBlank { t("Подключение…", "Пайвастшавӣ…") }
+        }
+        sub(
+            body,
+            "${t("Сообщения между абонентами Tvoice", "Паёмҳо байни муштариёни Tvoice")} • $chatStatus",
+            14,
+            if (ChatClient.isConnected) green else muted,
+            5
+        )
         val conversations = ChatStore.conversations(ownNumber)
         if (conversations.isEmpty()) {
             emptyState(
@@ -666,33 +689,141 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     }
 
     private fun showNewChatDialog() {
-        val field = EditText(this).apply {
-            hint = t("SIP-номер абонента", "Рақами SIP-и муштарӣ")
-            inputType = InputType.TYPE_CLASS_PHONE
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_CONTACTS), 14)
+            return
+        }
+
+        val contacts = loadContacts().map { (name, phone) ->
+            name to phone.filter { it.isDigit() || it == '+' }
+        }.filter { it.second.isNotBlank() }
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(8), dp(18), dp(12))
+        }
+        val search = EditText(this).apply {
+            hint = t("Поиск или номер абонента", "Ҷустуҷӯ ё рақами муштарӣ")
+            inputType = InputType.TYPE_CLASS_TEXT
+            setSingleLine()
             setTextColor(dark)
             setHintTextColor(muted)
-            setPadding(dp(16), 0, dp(16), 0)
-            background = rounded(surface, dp(13).toFloat(), line, 1)
+            setPadding(dp(15), 0, dp(15), 0)
+            background = rounded(surface, dp(15).toFloat(), line, 1)
         }
-        val wrap = FrameLayout(this).apply {
-            setPadding(dp(20), dp(12), dp(20), 0)
-            addView(field, FrameLayout.LayoutParams(-1, dp(56)))
-        }
-        AlertDialog.Builder(this)
-            .setTitle(t("Новый чат", "Чати нав"))
-            .setView(wrap)
-            .setNegativeButton(t("Отмена", "Бекор кардан"), null)
-            .setPositiveButton(t("Открыть", "Кушодан")) { _, _ ->
-                val peer = field.text.toString().trim()
-                if (peer.isBlank()) toast(t("Введите номер", "Рақамро ворид кунед")) else showConversation(peer)
+        panel.addView(search, LinearLayout.LayoutParams(-1, dp(52)))
+
+        val addContact = TextView(this).apply {
+            text = "＋  ${t("Добавить новый контакт", "Илова кардани тамоси нав")}"
+            textSize = 15f
+            setTextColor(blue)
+            gravity = Gravity.CENTER_VERTICAL
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(12), 0, dp(12), 0)
+            setOnClickListener {
+                runCatching {
+                    startActivity(Intent(Intent.ACTION_INSERT, ContactsContract.Contacts.CONTENT_URI))
+                }.onFailure { toast(t("Не удалось открыть контакты", "Кушодани тамосҳо нашуд")) }
             }
-            .show()
+        }
+        panel.addView(addContact, LinearLayout.LayoutParams(-1, dp(50)).apply { topMargin = dp(6) })
+
+        val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val scroll = ScrollView(this).apply { addView(results) }
+        val listHeight = (resources.displayMetrics.heightPixels * 0.48f)
+            .toInt()
+            .coerceIn(dp(220), dp(420))
+        panel.addView(scroll, LinearLayout.LayoutParams(-1, listHeight))
+
+        lateinit var dialog: AlertDialog
+        fun render(queryValue: String) {
+            results.removeAllViews()
+            val query = queryValue.trim()
+            val normalizedQuery = query.filter { it.isDigit() || it == '+' }
+            if (normalizedQuery.length >= 2 && contacts.none { it.second == normalizedQuery }) {
+                chatContactRow(
+                    results,
+                    t("Написать абоненту", "Ба муштарӣ нависед"),
+                    normalizedQuery
+                ) {
+                    dialog.dismiss()
+                    showConversation(normalizedQuery)
+                }
+            }
+            contacts.asSequence()
+                .filter { query.isBlank() || it.first.contains(query, true) || it.second.contains(query) }
+                .take(50)
+                .forEach { (name, phone) ->
+                    chatContactRow(results, name.ifBlank { phone }, phone) {
+                        dialog.dismiss()
+                        showConversation(phone)
+                    }
+                }
+            if (results.childCount == 0) {
+                sub(
+                    results,
+                    t("Контакты не найдены", "Тамосҳо ёфт нашуданд"),
+                    14,
+                    muted,
+                    18
+                ).gravity = Gravity.CENTER
+            }
+        }
+
+        dialog = AlertDialog.Builder(this)
+            .setTitle(t("Новый чат", "Чати нав"))
+            .setView(panel)
+            .setNegativeButton(t("Закрыть", "Пӯшидан"), null)
+            .create()
+        search.doAfterTextChanged { render(it?.toString().orEmpty()) }
+        render("")
+        dialog.show()
+        search.requestFocus()
     }
 
-    private fun showConversation(peer: String) {
+    private fun chatContactRow(
+        parent: LinearLayout,
+        name: String,
+        phone: String,
+        action: () -> Unit
+    ) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            setOnClickListener { action() }
+        }
+        row.addView(TextView(this).apply {
+            text = avatarSymbols(name, phone)
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = rounded(blue, dp(21).toFloat())
+        }, LinearLayout.LayoutParams(dp(42), dp(42)))
+        val labels = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, 0, 0)
+        }
+        heading(labels, name, 15, dark, 0)
+        sub(labels, phone, 12, muted, 2)
+        row.addView(labels, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(TextView(this).apply {
+            text = "›"
+            textSize = 25f
+            setTextColor(muted)
+            gravity = Gravity.CENTER
+        }, LinearLayout.LayoutParams(dp(30), dp(42)))
+        parent.addView(row, LinearLayout.LayoutParams(-1, dp(56)))
+        parent.addView(View(this).apply { setBackgroundColor(line) }, LinearLayout.LayoutParams(-1, dp(1)).apply {
+            leftMargin = dp(54)
+        })
+    }
+
+    private fun showConversation(peer: String, refresh: Boolean = true) {
         homePage = HomePage.Chat
         currentChatPeer = peer
         ChatStore.markRead(ownNumber, peer)
+        if (refresh) ChatClient.syncConversation(peer)
         createShell()
         val body = screen(false).apply { setPadding(dp(14), dp(8), dp(14), dp(12)) }
         val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -722,6 +853,22 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         body.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
 
         val composer = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val emoji = TextView(this).apply {
+            text = "☺"
+            textSize = 24f
+            setTextColor(blue)
+            gravity = Gravity.CENTER
+            contentDescription = t("Смайлики", "Табассумҳо")
+        }
+        composer.addView(emoji, LinearLayout.LayoutParams(dp(40), dp(48)))
+        val attach = ImageView(this).apply {
+            setImageResource(R.drawable.ic_attach)
+            setColorFilter(blue)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            contentDescription = t("Фото или файл", "Акс ё файл")
+            setOnClickListener { chooseChatAttachment(peer) }
+        }
+        composer.addView(attach, LinearLayout.LayoutParams(dp(40), dp(48)))
         val input = EditText(this).apply {
             hint = t("Сообщение", "Паём")
             textSize = 16f
@@ -731,6 +878,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             setPadding(dp(15), 0, dp(15), 0)
             background = rounded(surface, dp(22).toFloat(), line, 1)
         }
+        emoji.setOnClickListener { showEmojiPicker(input) }
         composer.addView(input, LinearLayout.LayoutParams(0, dp(48), 1f))
         val send = TextView(this).apply {
             text = "➤"
@@ -742,13 +890,73 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
                 val text = input.text.toString().trim()
                 if (text.isBlank()) return@setOnClickListener
                 runCatching { sip.sendMessage(peer, text) }
-                    .onSuccess { input.text.clear(); showConversation(peer) }
+                    .onSuccess { input.text.clear(); showConversation(peer, refresh = false) }
                     .onFailure { toast(it.message ?: t("Ошибка отправки", "Хатои ирсол")) }
             }
         }
         composer.addView(send, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(8) })
         body.addView(composer, LinearLayout.LayoutParams(-1, dp(52)))
         scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun showEmojiPicker(input: EditText) {
+        val emojis = listOf(
+            "😀", "😂", "😊", "😍", "🥰", "😎",
+            "👍", "👏", "🙏", "💪", "👌", "🤝",
+            "❤️", "🔥", "🎉", "✅", "☎️", "📞",
+            "😢", "😮", "🤔", "😉", "🙂", "👋"
+        )
+        val grid = GridLayout(this).apply {
+            columnCount = 6
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+        lateinit var dialog: AlertDialog
+        emojis.forEach { value ->
+            grid.addView(TextView(this).apply {
+                text = value
+                textSize = 25f
+                gravity = Gravity.CENTER
+                setOnClickListener {
+                    val start = input.selectionStart.coerceAtLeast(0)
+                    input.text.insert(start, value)
+                    dialog.dismiss()
+                }
+            }, GridLayout.LayoutParams().apply {
+                width = dp(48)
+                height = dp(48)
+            })
+        }
+        dialog = AlertDialog.Builder(this)
+            .setTitle(t("Смайлики", "Табассумҳо"))
+            .setView(grid)
+            .setNegativeButton(t("Закрыть", "Пӯшидан"), null)
+            .create()
+        dialog.show()
+    }
+
+    private fun chooseChatAttachment(peer: String) {
+        pendingChatAttachmentPeer = peer
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            type = "*/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf(
+                    "image/*",
+                    "video/*",
+                    "audio/*",
+                    "application/pdf",
+                    "text/*",
+                    "application/msword",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/vnd.ms-excel",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "application/zip"
+                )
+            )
+        }
+        startActivityForResult(intent, REQUEST_CHAT_ATTACHMENT)
     }
 
     private fun addMessageBubble(parent: LinearLayout, message: ChatMessage) {
@@ -758,7 +966,11 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             setPadding(dp(13), dp(9), dp(13), dp(7))
             background = rounded(if (message.incoming) surface else blue, dp(16).toFloat())
         }
-        sub(bubble, message.text, 15, if (message.incoming) dark else Color.WHITE, 0)
+        if (message.attachmentName != null) {
+            addAttachmentPreview(bubble, message)
+        } else {
+            sub(bubble, message.text, 15, if (message.incoming) dark else Color.WHITE, 0)
+        }
         val status = when (message.status) {
             "sending" -> "…"
             "failed" -> "!"
@@ -779,6 +991,84 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             }
         )
         parent.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+    }
+
+    private fun addAttachmentPreview(parent: LinearLayout, message: ChatMessage) {
+        val foreground = if (message.incoming) dark else Color.WHITE
+        val secondary = if (message.incoming) muted else Color.rgb(210, 226, 255)
+        if (message.attachmentMime?.startsWith("image/") == true) {
+            val preview = ImageView(this).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setImageResource(R.drawable.ic_chat)
+                setColorFilter(secondary)
+                setPadding(dp(55), dp(35), dp(55), dp(35))
+                background = rounded(
+                    if (message.incoming) page else Color.rgb(48, 94, 224),
+                    dp(12).toFloat()
+                )
+                contentDescription = message.attachmentName
+                setOnClickListener { openAttachment(message) }
+            }
+            parent.addView(preview, LinearLayout.LayoutParams(dp(210), dp(145)))
+            if (message.attachmentId != null) {
+                ChatClient.downloadAttachment(message) { result ->
+                    result.onSuccess { file ->
+                        val bitmap = decodeChatPreview(file)
+                        if (bitmap != null) {
+                            preview.clearColorFilter()
+                            preview.setPadding(0, 0, 0, 0)
+                            preview.setImageBitmap(bitmap)
+                        }
+                    }
+                }
+            }
+        }
+        val label = TextView(this).apply {
+            val icon = when {
+                message.attachmentMime?.startsWith("image/") == true -> "🖼"
+                message.attachmentMime?.startsWith("video/") == true -> "🎬"
+                message.attachmentMime?.startsWith("audio/") == true -> "🎵"
+                else -> "📎"
+            }
+            text = "$icon  ${message.attachmentName}\n${formatFileSize(message.attachmentSize)}"
+            textSize = 14f
+            setTextColor(foreground)
+            setPadding(0, dp(7), 0, dp(2))
+            setOnClickListener { openAttachment(message) }
+        }
+        parent.addView(label, LinearLayout.LayoutParams(-2, -2))
+    }
+
+    private fun decodeChatPreview(file: File) = runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        var sample = 1
+        while (bounds.outWidth / sample > 900 || bounds.outHeight / sample > 900) sample *= 2
+        BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply { inSampleSize = sample })
+    }.getOrNull()
+
+    private fun openAttachment(message: ChatMessage) {
+        toast(t("Загрузка файла…", "Боргирии файл…"))
+        ChatClient.downloadAttachment(message) { result ->
+            result.onSuccess { file ->
+                val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, message.attachmentMime ?: "*/*")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                runCatching { startActivity(intent) }
+                    .onFailure { toast(t("Нет приложения для открытия файла", "Барнома барои кушодани файл нест")) }
+            }.onFailure { error ->
+                toast(error.message ?: t("Не удалось загрузить файл", "Боргирии файл нашуд"))
+            }
+        }
+    }
+
+    private fun formatFileSize(size: Long): String = when {
+        size <= 0 -> t("Загрузка…", "Боргирӣ…")
+        size < 1024 -> "$size Б"
+        size < 1024 * 1024 -> "${size / 1024} КБ"
+        else -> String.format(Locale.getDefault(), "%.1f МБ", size / 1024.0 / 1024.0)
     }
 
     private fun loadContacts(): List<Pair<String, String>> {
@@ -907,7 +1197,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
             muted,
             2
         )
-        sub(scrollBody, "Tvoice 0.8.5 • Tvoice SIP Core 1.3", 12, blue, 7)
+        sub(scrollBody, "Tvoice 0.9.0 • SIP Core 1.3 • Chat Core 0.2", 12, blue, 7)
         sub(scrollBody, "Developed by Шогирдои Малем", 12, dark, 5).typeface = Typeface.DEFAULT_BOLD
         compactButton(scrollBody, t("Выйти из аккаунта", "Баромадан аз ҳисоб"), red) {
             sip.logout()
@@ -1306,6 +1596,28 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
         }
     }
 
+    override fun onChatState(connected: Boolean, message: String) = runOnUiThread {
+        if (!TvoiceRuntime.isMainUiVisible || homePage != HomePage.Chat) return@runOnUiThread
+        currentChatPeer?.let { showConversation(it, refresh = false) } ?: showChats(refresh = false)
+    }
+
+    override fun onChatSync(peer: String?) = runOnUiThread {
+        if (!TvoiceRuntime.isMainUiVisible || homePage != HomePage.Chat) return@runOnUiThread
+        val openedPeer = currentChatPeer
+        if (openedPeer != null && (peer == null || peer == openedPeer)) {
+            showConversation(openedPeer, refresh = false)
+        } else if (openedPeer == null) {
+            showChats(refresh = false)
+        }
+    }
+
+    override fun onChatMessage(message: ChatMessage) = runOnUiThread {
+        if (!TvoiceRuntime.isMainUiVisible || !message.incoming) return@runOnUiThread
+        if (currentChatPeer != message.peer) {
+            toast(t("Новое сообщение от ${message.peer}", "Паёми нав аз ${message.peer}"))
+        }
+    }
+
     private fun navItem(icon: Int, label: String, selected: Boolean, action: () -> Unit) {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
@@ -1335,6 +1647,18 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
                 profileUri = uri
                 getSharedPreferences("tvoice", MODE_PRIVATE).edit().putString("profile_uri", uri.toString()).apply()
                 profileImage?.clearColorFilter(); profileImage?.setPadding(dp(2), dp(2), dp(2), dp(2)); profileImage?.setImageURI(uri)
+            }
+        }
+        if (requestCode == REQUEST_CHAT_ATTACHMENT && resultCode == RESULT_OK) {
+            val peer = pendingChatAttachmentPeer
+            pendingChatAttachmentPeer = ""
+            data?.data?.let { uri ->
+                runCatching {
+                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                runCatching { ChatClient.sendAttachment(peer, uri) }
+                    .onSuccess { showConversation(peer, refresh = false) }
+                    .onFailure { toast(it.message ?: t("Не удалось отправить файл", "Ирсоли файл нашуд")) }
             }
         }
     }
@@ -1551,10 +1875,12 @@ class MainActivity : AppCompatActivity(), SipManager.Observer {
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()
     override fun onDestroy() {
         TvoiceRuntime.removeObserver(this)
+        ChatClient.removeObserver(this)
         super.onDestroy()
     }
 
     companion object {
         const val EXTRA_OPEN_CHAT = "tj.tvoice.app.extra.OPEN_CHAT"
+        private const val REQUEST_CHAT_ATTACHMENT = 21
     }
 }

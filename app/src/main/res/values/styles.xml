@@ -9,4 +9,14 @@
         <item name="android:windowBackground">#F7F9FC</item>
         <item name="android:colorAccent">@color/tvoice_blue</item>
     </style>
+
+    <style name="Theme.Tvoice.Splash" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">#F8FBFF</item>
+        <item name="android:statusBarColor">#F8FBFF</item>
+        <item name="android:navigationBarColor">#FAFCFF</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
 </resources>

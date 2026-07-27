@@ -11,7 +11,11 @@ data class ChatMessage(
     val text: String,
     val incoming: Boolean,
     val timestamp: Long,
-    val status: String
+    val status: String,
+    val attachmentId: String? = null,
+    val attachmentName: String? = null,
+    val attachmentMime: String? = null,
+    val attachmentSize: Long = 0
 )
 
 data class ChatConversation(
@@ -47,7 +51,11 @@ object ChatStore {
                     text = item.optString("text"),
                     incoming = item.optBoolean("incoming"),
                     timestamp = item.optLong("timestamp"),
-                    status = if (storedStatus == "sending") "failed" else storedStatus
+                    status = if (storedStatus == "sending") "failed" else storedStatus,
+                    attachmentId = item.optString("attachmentId").takeIf(String::isNotBlank),
+                    attachmentName = item.optString("attachmentName").takeIf(String::isNotBlank),
+                    attachmentMime = item.optString("attachmentMime").takeIf(String::isNotBlank),
+                    attachmentSize = item.optLong("attachmentSize")
                 )
             }
         }
@@ -55,6 +63,24 @@ object ChatStore {
 
     @Synchronized
     fun addOutgoing(owner: String, peer: String, text: String): ChatMessage = add(owner, peer, text, false, "sending")
+
+    @Synchronized
+    fun addOutgoingAttachment(
+        owner: String,
+        peer: String,
+        name: String,
+        mimeType: String,
+        size: Long
+    ): ChatMessage = add(
+        owner = owner,
+        peer = peer,
+        text = name,
+        incoming = false,
+        status = "sending",
+        attachmentName = name,
+        attachmentMime = mimeType,
+        attachmentSize = size
+    )
 
     @Synchronized
     fun addIncoming(owner: String, peer: String, text: String): ChatMessage = add(owner, peer, text, true, "received")
@@ -65,6 +91,87 @@ object ChatStore {
         if (index < 0) return
         messages[index] = messages[index].copy(status = if (delivered) "sent" else "failed")
         persist()
+    }
+
+    @Synchronized
+    fun confirmOutgoing(
+        owner: String,
+        peer: String,
+        text: String,
+        serverId: Long,
+        timestamp: Long,
+        attachmentId: String? = null,
+        attachmentName: String? = null,
+        attachmentMime: String? = null,
+        attachmentSize: Long = 0
+    ): ChatMessage {
+        val placeholderIndex = messages.indexOfLast {
+            !it.incoming && it.owner == owner && it.peer == peer &&
+                it.text == text && it.status == "sending"
+        }
+        val serverIndex = messages.indexOfFirst {
+            it.owner == owner && it.peer == peer && it.id == serverId
+        }
+        val confirmed = ChatMessage(
+            id = serverId,
+            owner = owner,
+            peer = peer,
+            text = text,
+            incoming = false,
+            timestamp = timestamp,
+            status = "sent",
+            attachmentId = attachmentId,
+            attachmentName = attachmentName,
+            attachmentMime = attachmentMime,
+            attachmentSize = attachmentSize
+        )
+        when {
+            serverIndex >= 0 -> {
+                messages[serverIndex] = confirmed
+                if (placeholderIndex >= 0 && placeholderIndex != serverIndex) {
+                    messages.removeAt(placeholderIndex)
+                }
+            }
+            placeholderIndex >= 0 -> messages[placeholderIndex] = confirmed
+            else -> messages += confirmed
+        }
+        trimAndPersist()
+        return confirmed
+    }
+
+    @Synchronized
+    fun upsertServer(
+        owner: String,
+        peer: String,
+        serverId: Long,
+        text: String,
+        incoming: Boolean,
+        timestamp: Long,
+        attachmentId: String? = null,
+        attachmentName: String? = null,
+        attachmentMime: String? = null,
+        attachmentSize: Long = 0
+    ): ChatMessage {
+        val index = messages.indexOfFirst {
+            it.owner == owner && it.peer == peer && it.id == serverId
+        }
+        val existingStatus = messages.getOrNull(index)?.status
+        val item = ChatMessage(
+            id = serverId,
+            owner = owner,
+            peer = peer,
+            text = text,
+            incoming = incoming,
+            timestamp = timestamp,
+            status = if (incoming && existingStatus == "read") "read" else if (incoming) "received" else "sent",
+            attachmentId = attachmentId,
+            attachmentName = attachmentName,
+            attachmentMime = attachmentMime,
+            attachmentSize = attachmentSize
+        )
+        if (index >= 0) messages[index] = item else messages += item
+        trimAndPersist()
+        return item
     }
 
     @Synchronized
@@ -107,7 +214,16 @@ object ChatStore {
         if (changed) persist()
     }
 
-    private fun add(owner: String, peer: String, text: String, incoming: Boolean, status: String): ChatMessage {
+    private fun add(
+        owner: String,
+        peer: String,
+        text: String,
+        incoming: Boolean,
+        status: String,
+        attachmentName: String? = null,
+        attachmentMime: String? = null,
+        attachmentSize: Long = 0
+    ): ChatMessage {
         val item = ChatMessage(
             id = System.currentTimeMillis() * 1000 + (messages.size % 1000),
             owner = owner,
@@ -115,12 +231,19 @@ object ChatStore {
             text = text,
             incoming = incoming,
             timestamp = System.currentTimeMillis(),
-            status = status
+            status = status,
+            attachmentName = attachmentName,
+            attachmentMime = attachmentMime,
+            attachmentSize = attachmentSize
         )
         messages += item
+        trimAndPersist()
+        return item
+    }
+
+    private fun trimAndPersist() {
         while (messages.size > MAX_MESSAGES) messages.removeAt(0)
         persist()
-        return item
     }
 
     private fun persist() {
@@ -135,6 +258,10 @@ object ChatStore {
                 put("incoming", item.incoming)
                 put("timestamp", item.timestamp)
                 put("status", item.status)
+                put("attachmentId", item.attachmentId ?: "")
+                put("attachmentName", item.attachmentName ?: "")
+                put("attachmentMime", item.attachmentMime ?: "")
+                put("attachmentSize", item.attachmentSize)
             })
         }
         appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)

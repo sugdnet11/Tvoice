@@ -299,7 +299,7 @@ internal class TvoiceSipCore(
             "CSeq: $registrationCseq REGISTER",
             "Contact: <${contactUri()}>;ob;expires=$expires",
             "Expires: $expires",
-            "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3",
+            "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3",
             "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE",
             "Supported: path, gruu, outbound"
         )
@@ -332,7 +332,7 @@ internal class TvoiceSipCore(
             "Contact: <${contactUri()}>",
             "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE",
             "Supported: replaces, timer",
-            "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3"
+            "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3"
         )
         call.routeSet.forEach { headers += "Route: $it" }
         call.authChallenge?.let { challenge ->
@@ -353,7 +353,7 @@ internal class TvoiceSipCore(
             "To: <sip:${call.remoteUser}@${SipConfig.DOMAIN}>${call.remoteTag?.let { ";tag=$it" }.orEmpty()}",
             "Call-ID: ${call.callId}",
             "CSeq: ${call.localCseq} CANCEL",
-            "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3"
+            "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3"
         )
         sendRequest("CANCEL $uri SIP/2.0", headers, "", call.peer)
     }
@@ -368,7 +368,7 @@ internal class TvoiceSipCore(
             "To: ${response.header("To") ?: "<sip:${call.remoteUser}@${SipConfig.DOMAIN}>"}",
             "Call-ID: ${call.callId}",
             "CSeq: ${response.cseqNumber() ?: call.localCseq} ACK",
-            "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3"
+            "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3"
         )
         if (!non2xx) call.routeSet.forEach { headers += "Route: $it" }
         sendRequest("ACK $uri SIP/2.0", headers, "", call.peer)
@@ -384,7 +384,7 @@ internal class TvoiceSipCore(
             "Call-ID: ${call.callId}",
             "CSeq: ${call.localCseq} $method",
             "Contact: <${contactUri()}>",
-            "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3"
+            "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3"
         )
         call.routeSet.forEach { headers += "Route: $it" }
         if (contentType != null) headers += "Content-Type: $contentType"
@@ -404,7 +404,7 @@ internal class TvoiceSipCore(
             "Contact: <${contactUri()}>",
             "Content-Type: text/plain; charset=UTF-8",
             "Accept: text/plain",
-            "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3"
+            "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3"
         )
         transaction.challenge?.let { challenge ->
             transaction.nonceCount += 1
@@ -783,7 +783,7 @@ internal class TvoiceSipCore(
         request.header("CSeq")?.let { headers += "CSeq: $it" }
         headers += "Contact: <${contactUri()}>"
         headers += "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE"
-        headers += "User-Agent: Tvoice/0.7 TvoiceSipCore/1.3"
+        headers += "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3"
         if (body.isNotEmpty()) headers += "Content-Type: application/sdp"
         sendRequest("SIP/2.0 $code $reason", headers, body, target)
     }

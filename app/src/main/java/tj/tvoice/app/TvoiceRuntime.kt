@@ -32,6 +32,7 @@ object TvoiceRuntime : SipManager.Observer {
         if (manager != null) return
         appContext = context.applicationContext
         ChatStore.initialize(appContext)
+        ChatClient.initialize(appContext)
         manager = SipManager(appContext, this)
     }
 
@@ -98,8 +99,7 @@ object TvoiceRuntime : SipManager.Observer {
         val body = text.trim()
         require(peer.isNotBlank()) { "Введите номер абонента" }
         require(body.isNotBlank()) { "Введите сообщение" }
-        ChatStore.addOutgoing(activeUsername, peer, body)
-        requireManager().sendMessage(peer, body)
+        ChatClient.sendMessage(peer, body)
     }
     fun toggleHold(): Boolean = requireManager().toggleHold()
     fun toggleMute(): Boolean = requireManager().toggleMute()
@@ -110,11 +110,13 @@ object TvoiceRuntime : SipManager.Observer {
     fun reconnectNetwork() {
         ChatStore.failSending()
         requireManager().reconnect()
+        ChatClient.reconnect()
     }
 
     @Synchronized
     fun logout() {
         requireManager().logout()
+        ChatClient.logout()
         CredentialStore.clear(appContext)
         activeUsername = ""
         pendingPassword = ""
@@ -130,6 +132,7 @@ object TvoiceRuntime : SipManager.Observer {
         registrationMessage = message
         if (state == RegistrationState.Ok && activeUsername.isNotBlank() && pendingPassword.isNotBlank()) {
             runCatching { CredentialStore.save(appContext, activeUsername, pendingPassword) }
+            ChatClient.login(activeUsername, pendingPassword)
         }
         if (state == RegistrationState.Failed) restoreStarted = false
         observers.forEach { observer -> runCatching { observer.onRegistration(state, message) } }

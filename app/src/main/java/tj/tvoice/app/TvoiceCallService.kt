@@ -26,7 +26,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 
 /** Keeps SIP/UDP registration alive and exposes calls through Android's native call UI. */
-class TvoiceCallService : Service(), SipManager.Observer {
+class TvoiceCallService : Service(), SipManager.Observer, ChatClient.Observer {
     private var manualRingtone: Ringtone? = null
     private var ringbackTone: ToneGenerator? = null
     private var ringbackPlaying = false
@@ -57,6 +57,7 @@ class TvoiceCallService : Service(), SipManager.Observer {
         createNotificationChannels()
         TvoiceRuntime.initialize(this)
         TvoiceRuntime.addObserver(this)
+        ChatClient.addObserver(this)
         connectivityManager = getSystemService(ConnectivityManager::class.java)
         currentNetwork = connectivityManager.activeNetwork
         connectivityManager.registerDefaultNetworkCallback(networkCallback)
@@ -95,6 +96,7 @@ class TvoiceCallService : Service(), SipManager.Observer {
             networkCallbackRegistered = false
         }
         TvoiceRuntime.removeObserver(this)
+        ChatClient.removeObserver(this)
         super.onDestroy()
     }
 
@@ -145,6 +147,15 @@ class TvoiceCallService : Service(), SipManager.Observer {
 
     override fun onMessage(state: MessageState, remote: String, text: String, message: String) {
         if (state != MessageState.Received || TvoiceRuntime.isMainUiVisible || !chatNotificationsEnabled()) return
+        showChatNotification(remote, text)
+    }
+
+    override fun onChatMessage(message: ChatMessage) {
+        if (!message.incoming || TvoiceRuntime.isMainUiVisible || !chatNotificationsEnabled()) return
+        showChatNotification(message.peer, message.text)
+    }
+
+    private fun showChatNotification(remote: String, text: String) {
         val open = PendingIntent.getActivity(
             this,
             3000 + remote.hashCode().and(0x7fff),
