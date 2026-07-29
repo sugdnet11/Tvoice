@@ -1,0 +1,43 @@
+name: TvoiceIOS
+options:
+  bundleIdPrefix: tj.tvoice
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16.0"
+packages:
+  LiveKit:
+    url: https://github.com/livekit/client-sdk-swift.git
+    exactVersion: 2.15.3
+targets:
+  TvoiceIOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: TvoiceIOS
+    info:
+      path: TvoiceIOS/Info.plist
+    entitlements:
+      path: TvoiceIOS/TvoiceIOS.entitlements
+    dependencies:
+      - package: LiveKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tj.tvoice.ios
+        PRODUCT_NAME: Tvoice
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
+        SWIFT_VERSION: 5.10
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        SUPPORTS_MACCATALYST: NO
+        GENERATE_INFOPLIST_FILE: NO
+schemes:
+  TvoiceIOS:
+    build:
+      targets:
+        TvoiceIOS: all
+    run:
+      config: Debug
+    archive:
+      config: Release

@@ -4,9 +4,7 @@ import android.animation.AnimatorSet
 import android.animation.ObjectAnimator
 import android.app.Activity
 import android.content.Intent
-import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -34,22 +32,15 @@ class SplashActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        window.statusBarColor = Color.rgb(248, 251, 255)
-        window.navigationBarColor = Color.rgb(250, 252, 255)
+        window.statusBarColor = getColor(R.color.tvoice_page)
+        window.navigationBarColor = getColor(R.color.tvoice_page)
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true
         }
 
         val root = FrameLayout(this).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(
-                    Color.rgb(252, 254, 255),
-                    Color.rgb(239, 246, 255),
-                    Color.rgb(252, 254, 255)
-                )
-            )
+            setBackgroundColor(getColor(R.color.tvoice_page))
         }
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -70,7 +61,7 @@ class SplashActivity : Activity() {
         companyBrand.addView(TextView(this).apply {
             text = "TOJIKTELECOM"
             textSize = 24f
-            setTextColor(Color.rgb(15, 151, 228))
+            setTextColor(getColor(R.color.tvoice_blue))
             typeface = Typeface.create("sans-serif", Typeface.BOLD)
             letterSpacing = -0.025f
             includeFontPadding = false
@@ -93,7 +84,7 @@ class SplashActivity : Activity() {
         welcome.addView(TextView(this).apply {
             text = "Tvoice"
             textSize = 58f
-            setTextColor(Color.rgb(11, 32, 102))
+            setTextColor(getColor(R.color.tvoice_text_primary))
             typeface = Typeface.create("sans-serif", Typeface.BOLD)
             includeFontPadding = false
             gravity = Gravity.CENTER
@@ -101,7 +92,7 @@ class SplashActivity : Activity() {
         welcome.addView(TextView(this).apply {
             text = "Добро пожаловать!"
             textSize = 21f
-            setTextColor(Color.rgb(25, 48, 112))
+            setTextColor(getColor(R.color.tvoice_text_secondary))
             typeface = Typeface.create("sans-serif", Typeface.NORMAL)
             includeFontPadding = false
             gravity = Gravity.CENTER
@@ -115,12 +106,9 @@ class SplashActivity : Activity() {
         }
         repeat(3) { index ->
             dots.addView(View(this).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(
-                        if (index == 1) Color.rgb(0, 132, 236)
-                        else Color.rgb(96, 172, 244)
-                    )
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.OVAL
+                    setColor(if (index == 1) getColor(R.color.tvoice_blue) else getColor(R.color.tvoice_blue_soft))
                 }
             }, LinearLayout.LayoutParams(dp(9), dp(9)).apply {
                 if (index > 0) leftMargin = dp(14)

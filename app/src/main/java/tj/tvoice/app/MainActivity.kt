@@ -4,7 +4,9 @@ import android.Manifest
 import android.app.AlertDialog
 import android.app.NotificationManager
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Rect
@@ -12,15 +14,22 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.net.Uri
 import android.provider.ContactsContract
 import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
+import android.view.SurfaceHolder
 import android.view.View
+import android.view.ViewGroup
+import android.view.SurfaceView
+import android.view.WindowManager
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
+import androidx.activity.OnBackPressedCallback
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -30,17 +39,19 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.doAfterTextChanged
 import java.io.File
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
 class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observer {
-    private val sip get() = TvoiceRuntime
+    private val sip: TvoiceController get() = TvoiceRuntime
     private lateinit var rootContainer: FrameLayout
     private lateinit var shell: LinearLayout
     private lateinit var content: FrameLayout
     private lateinit var bottomBar: LinearLayout
     private var currentScroller: ScrollView? = null
     private var ownNumber = ""
+    private val chatOwner: String get() = SipIdentity.normalize(ownNumber)
     private var pendingPassword = ""
     private var dialedNumber = ""
     private val accountNumbers = mutableListOf<String>()
@@ -48,53 +59,133 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
     private var pendingAddedNumber = ""
     private var profileUri: Uri? = null
     private var profileImage: ImageView? = null
-    private val callHistory = mutableListOf<HistoryItem>()
+    private lateinit var callHistoryTracker: CallHistoryTracker
+    private lateinit var contactRepository: DeviceContactRepository
+    private val callHistory: List<CallHistoryItem> get() = callHistoryTracker.items
     private var homePage = HomePage.Calls
     private var currentChatPeer: String? = null
     private var pendingChatAttachmentPeer = ""
-    private var connectedAtMillis: Long? = null
-    private var activeHistoryItem: HistoryItem? = null
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private var callTimerRunnable: Runnable? = null
+    private var activeCallBanner: View? = null
+    private var activeDrawerOverlay: View? = null
+    private var activeDrawerPanel: View? = null
+    private var showingDialer = false
+    private var showingCallScreen = false
+    private var callUiMinimized = false
+    private var pendingVideoNumber = ""
+    private var videoLocalHolder: SurfaceHolder? = null
+    private var videoRemoteHolder: SurfaceHolder? = null
+    private var videoLocalView: View? = null
+    private var videoRemoteView: View? = null
+    private var callFilter = CallFilter.All
+    private var contactSearch = ""
+    private var chatSearch = ""
+    private var videoControlsVisible = true
+    private var videoControlsHideTask: Runnable? = null
+    private var debugPreviewScreen: String? = null
+    private var activeConversationMessages: LinearLayout? = null
+    private var activeConversationScroll: ScrollView? = null
 
-    private val blue = Color.rgb(26, 76, 221)
-    private val dark: Int get() = if (isDarkTheme) Color.rgb(241, 245, 249) else Color.rgb(10, 33, 74)
-    private val cyan = Color.rgb(2, 194, 229)
-    private val green = Color.rgb(34, 197, 94)
-    private val red = Color.rgb(239, 68, 68)
-    private val page: Int get() = if (isDarkTheme) Color.rgb(11, 18, 32) else Color.rgb(247, 249, 252)
-    private val surface: Int get() = if (isDarkTheme) Color.rgb(25, 36, 55) else Color.WHITE
-    private val incomingPage = Color.rgb(239, 245, 255)
-    private val callPageTop: Int get() = if (isDarkTheme) Color.rgb(20, 36, 61) else Color.rgb(229, 239, 255)
-    private val callPageBottom: Int get() = if (isDarkTheme) Color.rgb(11, 24, 43) else Color.rgb(248, 251, 255)
-    private val line: Int get() = if (isDarkTheme) Color.rgb(51, 65, 85) else Color.rgb(224, 230, 239)
-    private val muted: Int get() = if (isDarkTheme) Color.rgb(148, 163, 184) else Color.rgb(100, 116, 139)
+    private val blue: Int get() = TvoiceUi.color(this, R.color.tvoice_blue)
+    private val dark: Int get() = TvoiceUi.color(this, R.color.tvoice_text_primary)
+    private val cyan: Int get() = TvoiceUi.color(this, R.color.tvoice_cyan)
+    private val green: Int get() = TvoiceUi.color(this, R.color.tvoice_green)
+    private val red: Int get() = TvoiceUi.color(this, R.color.tvoice_red)
+    private val page: Int get() = TvoiceUi.color(this, R.color.tvoice_page)
+    private val surface: Int get() = TvoiceUi.color(this, R.color.tvoice_surface)
+    private val incomingPage: Int get() = TvoiceUi.color(this, R.color.tvoice_blue_soft)
+    private val callPageTop: Int get() = TvoiceUi.color(this, R.color.tvoice_blue_soft)
+    private val callPageBottom: Int get() = page
+    private val line: Int get() = TvoiceUi.color(this, R.color.tvoice_divider)
+    private val muted: Int get() = TvoiceUi.color(this, R.color.tvoice_text_secondary)
 
     private val preferences get() = getSharedPreferences("tvoice", MODE_PRIVATE)
-    private val isDarkTheme: Boolean get() = preferences.getString("theme", "light") == "dark"
+    private val themeMode: String get() = preferences.getString("theme", "system") ?: "system"
+    private val isDarkTheme: Boolean
+        get() = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
     private val isTajik: Boolean get() = preferences.getString("language", "ru") == "tg"
+    private val isDebuggable: Boolean
+        get() = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
 
-    private enum class HomePage { Contacts, Calls, Chat }
-
-    data class HistoryItem(
-        val number: String,
-        val direction: String,
-        val time: String,
-        var durationSeconds: Long = 0
-    )
+    private enum class HomePage { Contacts, Calls, Chat, Profile }
+    private enum class CallFilter { All, Missed, Favorites }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        val savedTheme = getSharedPreferences("tvoice", MODE_PRIVATE).getString("theme", "light")
+        if (isDebuggable && intent.hasExtra(EXTRA_UI_PREVIEW)) {
+            val previewPreferences = getSharedPreferences("tvoice", MODE_PRIVATE)
+            previewPreferences.edit()
+                .putString("theme", if (intent.getBooleanExtra(EXTRA_UI_PREVIEW_DARK, false)) "dark" else "light")
+                .putString("language", intent.getStringExtra(EXTRA_UI_PREVIEW_LANGUAGE) ?: "ru")
+                .apply()
+        }
+        val savedTheme = getSharedPreferences("tvoice", MODE_PRIVATE).getString("theme", "system")
         AppCompatDelegate.setDefaultNightMode(
-            if (savedTheme == "dark") AppCompatDelegate.MODE_NIGHT_YES else AppCompatDelegate.MODE_NIGHT_NO
+            when (savedTheme) {
+                "dark" -> AppCompatDelegate.MODE_NIGHT_YES
+                "light" -> AppCompatDelegate.MODE_NIGHT_NO
+                else -> AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
+            }
         )
         super.onCreate(savedInstanceState)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                when {
+                    closeActiveDrawer() -> Unit
+                    showingCallScreen && isOngoingCall() -> minimizeCall()
+                    showingDialer -> showCalls()
+                    currentChatPeer != null -> showChats(refresh = false)
+                    homePage != HomePage.Calls -> showCalls()
+                    else -> {
+                        isEnabled = false
+                        onBackPressedDispatcher.onBackPressed()
+                        isEnabled = true
+                    }
+                }
+            }
+        })
         WindowCompat.setDecorFitsSystemWindows(window, false)
         TvoiceRuntime.initialize(this)
+        savedInstanceState?.let { state ->
+            homePage = state.getString(STATE_HOME_PAGE)
+                ?.let { saved -> runCatching { HomePage.valueOf(saved) }.getOrNull() }
+                ?: HomePage.Calls
+            currentChatPeer = state.getString(STATE_CHAT_PEER)
+            callUiMinimized = state.getBoolean(STATE_CALL_MINIMIZED) && isOngoingCall()
+        }
+        callHistoryTracker = CallHistoryTracker(CallHistoryStore(this))
+        contactRepository = DeviceContactRepository(this)
+        accountNumbers.clear()
+        accountNumbers.addAll(TvoiceRuntime.accountUsernames())
         TvoiceRuntime.addObserver(this)
         ChatClient.addObserver(this)
         applySystemTheme()
         profileUri = preferences.getString("profile_uri", null)?.let(Uri::parse)
         loadCallHistory()
+        if (isDebuggable) {
+            debugPreviewScreen = intent.getStringExtra(EXTRA_UI_PREVIEW)
+            if (debugPreviewScreen != null) {
+                ownNumber = "73302"
+                renderDebugPreview(debugPreviewScreen.orEmpty())
+                return
+            }
+        }
         renderRuntimeState()
+    }
+
+    private fun renderDebugPreview(screen: String) {
+        when (screen.lowercase(Locale.US)) {
+            "login" -> showLogin()
+            "calls" -> showCalls()
+            "contacts" -> showContacts()
+            "chats" -> showChats(refresh = false)
+            "conversation" -> showConversation("73303", refresh = false)
+            "profile" -> showProfile()
+            "incoming" -> showIncomingCall("73303")
+            "audio" -> showCall("73303", t("Соединено", "Пайваст"))
+            "video" -> showVideoCall("73303", t("Соединено", "Пайваст"))
+            else -> showLogin()
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -103,14 +194,27 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         renderRuntimeState()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(STATE_HOME_PAGE, homePage.name)
+        outState.putString(STATE_CHAT_PEER, currentChatPeer)
+        outState.putBoolean(STATE_CALL_MINIMIZED, callUiMinimized)
+        super.onSaveInstanceState(outState)
+    }
+
     private fun renderRuntimeState() {
         ownNumber = TvoiceRuntime.activeUsername.ifBlank { TvoiceRuntime.savedUsername().orEmpty() }
+        intent.getStringExtra(EXTRA_OPEN_CHAT)?.takeIf { it.isNotBlank() }?.let { peer ->
+            intent.removeExtra(EXTRA_OPEN_CHAT)
+            if (isOngoingCall()) callUiMinimized = true
+            showConversation(peer)
+            return
+        }
         when (TvoiceRuntime.callState) {
             CallState.IncomingReceived -> showIncomingCall(TvoiceRuntime.remoteNumber)
             CallState.OutgoingInit, CallState.OutgoingProgress, CallState.OutgoingRinging ->
-                showCall(TvoiceRuntime.remoteNumber, t("Вызов…", "Занг…"))
-            CallState.Connected, CallState.StreamsRunning -> showCall(TvoiceRuntime.remoteNumber, t("Соединено", "Пайваст"))
-            CallState.Paused -> showCall(TvoiceRuntime.remoteNumber, t("Удержание", "Нигоҳдорӣ"))
+                renderOngoingCall(t("Вызов…", "Занг…"))
+            CallState.Connected, CallState.StreamsRunning -> renderOngoingCall(t("Соединено", "Пайваст"))
+            CallState.Paused -> renderOngoingCall(t("Удержание", "Нигоҳдорӣ"))
             else -> when (TvoiceRuntime.registrationState) {
                 RegistrationState.Ok -> intent.getStringExtra(EXTRA_OPEN_CHAT)?.let(::showConversation) ?: showCalls()
                 RegistrationState.Progress -> showConnecting()
@@ -122,9 +226,25 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         }
     }
 
+    private fun renderOngoingCall(state: String) {
+        if (callUiMinimized) showCurrentHomePage()
+        else showCall(TvoiceRuntime.remoteNumber, state)
+    }
+
+    private fun showCurrentHomePage() {
+        when (homePage) {
+            HomePage.Contacts -> showContacts()
+            HomePage.Calls -> showCalls()
+            HomePage.Chat -> currentChatPeer?.let { showConversation(it, refresh = false) }
+                ?: showChats(refresh = false)
+            HomePage.Profile -> showProfile()
+        }
+    }
+
     override fun onStart() {
         super.onStart()
         TvoiceRuntime.setMainUiVisible(true)
+        if (isDebuggable && debugPreviewScreen != null) return
         when (TvoiceRuntime.callState) {
             CallState.IncomingReceived,
             CallState.OutgoingInit,
@@ -133,64 +253,115 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
             CallState.Connected,
             CallState.StreamsRunning,
             CallState.Paused -> renderRuntimeState()
-            else -> Unit
+            else -> if (showingCallScreen || callUiMinimized) {
+                callUiMinimized = false
+                showCurrentHomePage()
+            }
         }
     }
 
     override fun onStop() {
         TvoiceRuntime.setMainUiVisible(false)
+        stopCallTimer()
         super.onStop()
     }
 
     private fun createShell(showNavigation: Boolean = true) {
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        stopCallTimer()
+        if (videoLocalHolder != null || videoRemoteHolder != null) {
+            sip.setVideoSurfaces(null, null)
+            videoLocalHolder = null
+            videoRemoteHolder = null
+        }
+        videoLocalView = null
+        videoRemoteView = null
+        activeConversationMessages = null
+        activeConversationScroll = null
+        activeCallBanner = null
+        activeDrawerOverlay = null
+        activeDrawerPanel = null
+        showingDialer = false
+        showingCallScreen = false
         val fallbackTopInset = statusBarHeight()
+        val attachedInsets = ViewCompat.getRootWindowInsets(window.decorView)
+        val attachedSystem = attachedInsets?.let { insets ->
+            val types = WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            val visible = insets.getInsets(types)
+            val stable = insets.getInsetsIgnoringVisibility(types)
+            intArrayOf(
+                maxOf(visible.left, stable.left),
+                maxOf(visible.top, stable.top, fallbackTopInset),
+                maxOf(visible.right, stable.right),
+                maxOf(visible.bottom, stable.bottom)
+            )
+        } ?: intArrayOf(0, fallbackTopInset, 0, 0)
         rootContainer = FrameLayout(this).apply {
             setBackgroundColor(page)
             // EMUI/Huawei can deliver the first WindowInsets event late (or not at all
             // when the content view is replaced). Keep the header below the status bar
             // from the very first frame and replace this fallback with real insets below.
-            setPadding(0, fallbackTopInset, 0, 0)
+            setPadding(attachedSystem[0], attachedSystem[1], attachedSystem[2], attachedSystem[3])
         }
         ViewCompat.setOnApplyWindowInsetsListener(rootContainer) { view, insets ->
             val types = WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
             val system = insets.getInsets(types)
             val stable = insets.getInsetsIgnoringVisibility(types)
-            val keyboard = insets.getInsets(WindowInsetsCompat.Type.ime())
-            view.setPadding(
-                maxOf(system.left, stable.left),
-                maxOf(system.top, stable.top, fallbackTopInset),
-                maxOf(system.right, stable.right),
-                maxOf(system.bottom, stable.bottom, keyboard.bottom)
-            )
+            val left = maxOf(system.left, stable.left)
+            val top = maxOf(system.top, stable.top, fallbackTopInset)
+            val right = maxOf(system.right, stable.right)
+            val bottom = maxOf(system.bottom, stable.bottom)
+            // adjustResize already accounts for the IME. Adding ime.bottom here a
+            // second time made chats jump up and then settle after every rebuild.
+            if (view.paddingLeft != left || view.paddingTop != top ||
+                view.paddingRight != right || view.paddingBottom != bottom
+            ) view.setPadding(left, top, right, bottom)
             insets
         }
         shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(page)
         }
-        if (showNavigation) shell.addView(topBar(), LinearLayout.LayoutParams(-1, dp(62)))
+        if (showNavigation) {
+            if (isOngoingCall()) {
+                val banner = activeCallBannerView()
+                activeCallBanner = banner
+                shell.addView(banner, LinearLayout.LayoutParams(-1, dp(58)))
+            }
+        }
         content = FrameLayout(this)
         currentScroller = null
         shell.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
         bottomBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(dp(6), dp(8), dp(6), dp(8))
+            setPadding(dp(4), dp(4), dp(4), dp(4))
             background = rounded(surface, 0f, line, 1)
-            elevation = dp(10).toFloat()
+            elevation = 0f
             visibility = if (showNavigation) View.VISIBLE else View.GONE
         }
         if (showNavigation) {
-            navItem(R.drawable.ic_contacts, t("Контакты", "Тамосҳо"), homePage == HomePage.Contacts) { showContacts() }
-            navItem(R.drawable.ic_call, t("Звонки", "Зангҳо"), homePage == HomePage.Calls) { showCalls() }
-            navItem(R.drawable.ic_chat, t("Чат", "Чат"), homePage == HomePage.Chat) { showChats() }
+            navItem(R.drawable.ic_contacts, t("Контакты", "Тамосҳо"), homePage == HomePage.Contacts) { switchHomePage(HomePage.Contacts) }
+            navItem(R.drawable.ic_call, t("Звонки", "Зангҳо"), homePage == HomePage.Calls) { switchHomePage(HomePage.Calls) }
+            navItem(R.drawable.ic_chat, t("Чаты", "Чатҳо"), homePage == HomePage.Chat) { switchHomePage(HomePage.Chat) }
+            navItem(R.drawable.ic_account, t("Аккаунт", "Ҳисоб"), homePage == HomePage.Profile) { switchHomePage(HomePage.Profile) }
         }
-        shell.addView(bottomBar, LinearLayout.LayoutParams(-1, dp(76)))
+        shell.addView(bottomBar, LinearLayout.LayoutParams(-1, dp(TvoiceUi.BOTTOM_NAV_DP)))
         rootContainer.addView(shell, FrameLayout.LayoutParams(-1, -1))
         setContentView(rootContainer)
         // Insets must be requested after the view is attached. Requesting them before
         // setContentView is ignored on a number of Huawei/Honor firmware versions.
         rootContainer.post { ViewCompat.requestApplyInsets(rootContainer) }
+    }
+
+    private fun switchHomePage(target: HomePage) {
+        if (target == homePage && currentChatPeer == null && !showingDialer) return
+        when (target) {
+            HomePage.Contacts -> showContacts()
+            HomePage.Calls -> showCalls()
+            HomePage.Chat -> showChats()
+            HomePage.Profile -> showProfile()
+        }
     }
 
     private fun topBar(): FrameLayout = FrameLayout(this).apply {
@@ -211,14 +382,111 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             background = rounded(blue, dp(21).toFloat())
-            setOnClickListener { showAccountDrawer() }
+            setOnClickListener { showProfile() }
         }, FrameLayout.LayoutParams(dp(42), dp(42), Gravity.END or Gravity.CENTER_VERTICAL))
+    }
+
+    private fun activeCallBannerView(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(14), dp(6), dp(10), dp(6))
+        background = rounded(if (isDarkTheme) Color.rgb(24, 54, 94) else Color.rgb(230, 240, 255), 0f, line, 1)
+        setOnClickListener { openCallScreen() }
+
+        addView(ImageView(this@MainActivity).apply {
+            setImageResource(R.drawable.ic_call)
+            setColorFilter(Color.WHITE)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            background = rounded(green, dp(18).toFloat())
+        }, LinearLayout.LayoutParams(dp(36), dp(36)))
+
+        val labels = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), 0, dp(8), 0)
+        }
+        heading(labels, TvoiceRuntime.remoteNumber, 14, dark, 0)
+        sub(labels, currentCallStatus(), 11, muted, 1)
+        addView(labels, LinearLayout.LayoutParams(0, -2, 1f))
+
+        val duration = TextView(this@MainActivity).apply {
+            textSize = 14f
+            setTextColor(blue)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        addView(duration, LinearLayout.LayoutParams(dp(64), dp(40)))
+        startCallTimer(duration, fallback = currentCallStatus())
+
+        addView(ImageView(this@MainActivity).apply {
+            setImageResource(R.drawable.ic_call_end)
+            setColorFilter(Color.WHITE)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            background = rounded(red, dp(18).toFloat())
+            contentDescription = t("Завершить звонок", "Анҷоми занг")
+            setOnClickListener { sip.hangup() }
+        }, LinearLayout.LayoutParams(dp(36), dp(36)))
+    }
+
+    private fun isOngoingCall(): Boolean = TvoiceRuntime.callState in setOf(
+        CallState.OutgoingInit,
+        CallState.OutgoingProgress,
+        CallState.OutgoingRinging,
+        CallState.Connected,
+        CallState.StreamsRunning,
+        CallState.Paused
+    )
+
+    private fun currentCallStatus(): String = when (TvoiceRuntime.callState) {
+        CallState.Connected, CallState.StreamsRunning -> t("Соединено", "Пайваст")
+        CallState.Paused -> t("Удержание", "Нигоҳдорӣ")
+        else -> t("Вызов…", "Занг…")
+    }
+
+    private fun openCallScreen() {
+        if (!isOngoingCall()) return
+        callUiMinimized = false
+        showCall(TvoiceRuntime.remoteNumber, currentCallStatus())
+    }
+
+    private fun minimizeCall() {
+        if (!isOngoingCall()) return
+        callUiMinimized = true
+        showCurrentHomePage()
+    }
+
+    private fun startCallTimer(view: TextView, fallback: String = "") {
+        stopCallTimer()
+        val task = object : Runnable {
+            override fun run() {
+                val started = TvoiceRuntime.callConnectedAtMillis
+                if (started == null) {
+                    view.text = fallback
+                } else {
+                    val elapsed = ((System.currentTimeMillis() - started) / 1_000L).coerceAtLeast(0L)
+                    view.text = formatDuration(elapsed)
+                }
+                uiHandler.postDelayed(this, 1_000L)
+            }
+        }
+        callTimerRunnable = task
+        task.run()
+    }
+
+    private fun stopCallTimer() {
+        callTimerRunnable?.let(uiHandler::removeCallbacks)
+        callTimerRunnable = null
+    }
+
+    private fun dismissActiveCallBanner() {
+        activeCallBanner?.let { banner -> (banner.parent as? ViewGroup)?.removeView(banner) }
+        activeCallBanner = null
+        stopCallTimer()
     }
 
     private fun screen(scroll: Boolean = true): LinearLayout {
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(20), dp(22), dp(24))
+            setPadding(dp(TvoiceUi.SCREEN_HORIZONTAL_DP), dp(12), dp(TvoiceUi.SCREEN_HORIZONTAL_DP), dp(20))
             setBackgroundColor(page)
         }
         content.removeAllViews()
@@ -236,22 +504,27 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
     private fun showLogin() {
         createShell(false)
         val body = screen().apply { gravity = Gravity.CENTER_HORIZONTAL }
+        body.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_tojiktelecom_mark)
+            adjustViewBounds = true
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            contentDescription = "Тоҷиктелеком"
+        }, LinearLayout.LayoutParams(dp(132), dp(54)).apply { topMargin = dp(20) })
         val logo = ImageView(this).apply {
-            setImageResource(R.drawable.ic_tvoice); setPadding(dp(6), dp(6), dp(6), dp(6))
-            background = rounded(Color.WHITE, dp(46).toFloat(), line, 1); elevation = dp(4).toFloat()
+            setImageResource(R.drawable.ic_tvoice)
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            background = rounded(surface, dp(36).toFloat(), line, 1)
         }
-        body.addView(logo, LinearLayout.LayoutParams(dp(92), dp(92)).apply { topMargin = dp(34) })
-        heading(body, "Tvoice", 38, blue, 18).apply { gravity = Gravity.CENTER; letterSpacing = -0.03f }
-        heading(body, t("Добро пожаловать", "Хуш омадед"), 25, dark, 34)
-        sub(body, t("Войдите в свою учётную запись", "Ба ҳисоби худ ворид шавед"), 15, muted, 6)
+        body.addView(logo, LinearLayout.LayoutParams(dp(72), dp(72)).apply { topMargin = dp(18) })
+        heading(body, "Tvoice", 28, blue, 10).apply { gravity = Gravity.CENTER; typeface = TvoiceUi.bold() }
+        heading(body, t("Добро пожаловать!", "Хуш омадед!"), 24, dark, 28).apply { gravity = Gravity.CENTER; typeface = TvoiceUi.bold() }
+        sub(body, t("Один вход для звонков и чата", "Як воридшавӣ барои занг ва чат"), TvoiceUi.BODY_SP.toInt(), muted, 6).gravity = Gravity.CENTER
 
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(18), dp(18), dp(18))
-            background = rounded(surface, dp(20).toFloat(), line, 1)
-            elevation = dp(3).toFloat()
+            setPadding(0, 0, 0, dp(20))
         }
-        body.addView(card, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(28) })
+        body.addView(card, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(24) })
         val username = modernEdit(card, t("SIP-номер", "Рақами SIP"), t("Например, 70707", "Масалан, 70707"), false)
         val password = modernEdit(card, t("Пароль", "Рамз"), t("Введите пароль", "Рамзро ворид кунед"), true)
         keepLoginFieldAboveKeyboard(username)
@@ -333,10 +606,29 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
                 } else toast(t("Для звонков нужен доступ к микрофону", "Барои зангҳо дастрасӣ ба микрофон лозим аст"))
             }
             11 -> showContacts()
-            14 -> if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            14 -> {
+                if (grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) {
+                    toast(t("Будут показаны только контакты Tvoice", "Танҳо тамосҳои Tvoice нишон дода мешаванд"))
+                }
                 showNewChatDialog()
-            } else {
-                toast(t("Разрешите доступ к контактам для выбора чата", "Барои интихоби чат дастрасӣ ба тамосҳоро иҷозат диҳед"))
+            }
+            15 -> {
+                val number = pendingVideoNumber
+                pendingVideoNumber = ""
+                if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED && number.isNotBlank()) {
+                    startVideoCall(number)
+                } else {
+                    toast(t("Для видеозвонка нужен доступ к камере", "Барои занги видеоӣ дастрасӣ ба камера лозим аст"))
+                }
+            }
+            16 -> {
+                if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED && sip.isVideoCall && !sip.isVideoCameraEnabled()) {
+                    sip.toggleVideoCamera()
+                    refreshVideoServiceType()
+                    if (showingCallScreen) showCall(TvoiceRuntime.remoteNumber, currentCallStatus())
+                } else if (grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) {
+                    toast(t("Камера останется выключенной", "Камера хомӯш мемонад"))
+                }
             }
             13 -> if (grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) {
                 toast(t(
@@ -350,9 +642,16 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
     private fun showDialer() {
         homePage = HomePage.Calls
         createShell()
-        val body = screen().apply { gravity = Gravity.CENTER_HORIZONTAL }
-        heading(body, ownNumber, 28, blue, 0).gravity = Gravity.CENTER
-        sub(body, t("● В сети", "● Дар шабака"), 14, green, 3).gravity = Gravity.CENTER
+        showingDialer = true
+        val compact = resources.configuration.screenHeightDp < 720
+        val body = screen(false).apply { gravity = Gravity.CENTER_HORIZONTAL }
+        heading(body, "Tvoice", 22, blue, 0).apply {
+            gravity = Gravity.CENTER
+            typeface = TvoiceUi.bold()
+        }
+        heading(body, ownNumber, if (compact) 20 else 24, dark, 7).gravity = Gravity.CENTER
+        sub(body, t("● В сети", "● Дар шабака"), 13, green, 2).gravity = Gravity.CENTER
+        body.addView(Space(this), LinearLayout.LayoutParams(1, 0, 1f))
         val numberBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), 0, dp(8), 0); background = rounded(surface, dp(18).toFloat(), line, 1)
@@ -366,7 +665,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
             dialedNumber = dialedNumber.dropLast(1); updateDialText(numberView)
         }
         numberBar.addView(erase, LinearLayout.LayoutParams(dp(48), dp(48)))
-        body.addView(numberBar, LinearLayout.LayoutParams(-1, dp(72)).apply { topMargin = dp(20) })
+        body.addView(numberBar, LinearLayout.LayoutParams(-1, dp(if (compact) 62 else 70)).apply { topMargin = dp(8) })
         val keys = arrayOf(arrayOf("1","2","3"), arrayOf("4","5","6"), arrayOf("7","8","9"), arrayOf("0"))
         keys.forEach { rowKeys ->
             val row = LinearLayout(this).apply { gravity = Gravity.CENTER }
@@ -377,15 +676,24 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
                     elevation = dp(2).toFloat()
                     setOnClickListener { dialedNumber += key; updateDialText(numberView) }
                 }
-                row.addView(keyView, LinearLayout.LayoutParams(dp(78), dp(70)).apply { setMargins(dp(7), dp(6), dp(7), dp(6)) })
+                row.addView(keyView, LinearLayout.LayoutParams(dp(if (compact) 70 else 78), dp(if (compact) 58 else 66)).apply {
+                    setMargins(dp(7), dp(if (compact) 3 else 5), dp(7), dp(if (compact) 3 else 5))
+                })
             }
             body.addView(row)
         }
+        val actions = LinearLayout(this).apply { gravity = Gravity.CENTER }
+        val videoCall = iconCircle(R.drawable.ic_videocam, blue, Color.WHITE) {
+            if (dialedNumber.isBlank()) toast(t("Введите номер", "Рақамро ворид кунед"))
+            else placeVideoCall(dialedNumber)
+        }.apply { contentDescription = t("Начать видеозвонок", "Оғози занги видеоӣ") }
+        actions.addView(videoCall, LinearLayout.LayoutParams(dp(if (compact) 64 else 70), dp(if (compact) 64 else 70)).apply { setMargins(dp(12), dp(5), dp(12), 0) })
         val call = iconCircle(R.drawable.ic_call, green, Color.WHITE) {
             if (dialedNumber.isBlank()) toast(t("Введите номер", "Рақамро ворид кунед"))
             else placeCall(dialedNumber)
-        }
-        body.addView(call, LinearLayout.LayoutParams(dp(78), dp(78)).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(12) })
+        }.apply { contentDescription = t("Начать аудиозвонок", "Оғози занги овозӣ") }
+        actions.addView(call, LinearLayout.LayoutParams(dp(if (compact) 68 else 76), dp(if (compact) 68 else 76)).apply { setMargins(dp(12), dp(3), dp(12), 0) })
+        body.addView(actions, LinearLayout.LayoutParams(-1, dp(if (compact) 76 else 84)))
     }
 
     private fun updateDialText(numberView: TextView) {
@@ -416,30 +724,77 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         currentChatPeer = null
         createShell()
         val body = screen()
-        heading(body, t("Звонки", "Зангҳо"), 27, dark, 0)
-        sub(body, t("История вызовов", "Таърихи зангҳо"), 14, muted, 5)
-        if (callHistory.isEmpty()) {
+        pageTitle(body, t("Звонки", "Зангҳо"))
+        callFilterBar(body)
+        val favorites = preferences.getStringSet(PREF_FAVORITE_CALLS, emptySet()).orEmpty()
+        val sourceHistory = if (debugPreviewScreen == "calls") listOf(
+            CallHistoryItem("73303", "Входящий", "10:42", 185, System.currentTimeMillis()),
+            CallHistoryItem("73304", "Исходящий", "09:15", 48, System.currentTimeMillis()),
+            CallHistoryItem("73305", "Входящий", "Вчера", 0, System.currentTimeMillis() - 86_400_000L)
+        ) else callHistory
+        val visible = sourceHistory.filter { item ->
+            when (callFilter) {
+                CallFilter.All -> true
+                CallFilter.Missed -> item.direction == "Входящий" && item.durationSeconds == 0L
+                CallFilter.Favorites -> item.number in favorites
+            }
+        }
+        if (visible.isEmpty()) {
             emptyState(
                 body,
                 R.drawable.ic_history,
-                t("История пока пуста", "Таърих ҳоло холӣ аст"),
+                if (callFilter == CallFilter.All) t("История пока пуста", "Таърих ҳоло холӣ аст") else t("В этом разделе пока нет звонков", "Дар ин бахш ҳоло занг нест"),
                 t("Нажмите кнопку клавиатуры, чтобы позвонить", "Барои занг задан тугмаи рақамгириро пахш кунед")
             )
         } else {
-            callHistory.forEach { item ->
-                historyCard(body, item)
+            var lastGroup = ""
+            visible.forEach { item ->
+                val group = callDayLabel(item.timestampMillis)
+                if (group != lastGroup) {
+                    sectionLabel(body, group)
+                    lastGroup = group
+                }
+                historyRow(body, item)
             }
         }
         addDialFab()
     }
 
-    private fun historyCard(parent: LinearLayout, item: HistoryItem) {
-        val accent = if (item.direction == "Входящий") green else blue
+    private fun callFilterBar(parent: LinearLayout) {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(3), dp(3), dp(3), dp(3))
+            background = rounded(TvoiceUi.color(this@MainActivity, R.color.tvoice_search), dp(10).toFloat())
+        }
+        listOf(
+            CallFilter.All to t("Все", "Ҳама"),
+            CallFilter.Missed to t("Пропущенные", "Аздастрафта"),
+            CallFilter.Favorites to t("Избранные", "Мунтахаб")
+        ).forEach { (filter, label) ->
+            bar.addView(TextView(this).apply {
+                text = label
+                TvoiceUi.style(this, TvoiceUi.CAPTION_SP, if (callFilter == filter) Color.WHITE else muted, TvoiceUi.medium())
+                gravity = Gravity.CENTER
+                background = if (callFilter == filter) rounded(blue, dp(8).toFloat()) else TvoiceUi.ripple(this@MainActivity, Color.TRANSPARENT, 8)
+                setOnClickListener {
+                    if (callFilter != filter) {
+                        callFilter = filter
+                        showCalls()
+                    }
+                }
+            }, LinearLayout.LayoutParams(0, dp(34), 1f))
+        }
+        parent.addView(bar, LinearLayout.LayoutParams(-1, dp(40)).apply { topMargin = dp(10) })
+    }
+
+    private fun historyRow(parent: LinearLayout, item: CallHistoryItem) {
+        val missed = item.direction == "Входящий" && item.durationSeconds == 0L
+        val accent = if (missed) red else green
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(12), dp(13), dp(12))
-            background = rounded(surface, dp(17).toFloat(), line, 1)
+            setPadding(0, dp(8), 0, dp(8))
+            background = TvoiceUi.ripple(this@MainActivity, surface, 0)
             setOnClickListener {
                 dialedNumber = item.number
                 showDialer()
@@ -447,60 +802,150 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         }
         val avatar = TextView(this).apply {
             text = avatarSymbols(item.number, item.number)
-            textSize = 16f
+            textSize = TvoiceUi.LIST_TITLE_SP
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            typeface = Typeface.DEFAULT_BOLD
-            background = rounded(accent, dp(24).toFloat())
+            typeface = TvoiceUi.semiBold()
+            background = rounded(accent, dp(20).toFloat())
         }
-        row.addView(avatar, LinearLayout.LayoutParams(dp(48), dp(48)))
+        row.addView(avatar, LinearLayout.LayoutParams(dp(40), dp(40)))
         val info = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(13), 0, dp(10), 0)
+            setPadding(dp(12), 0, dp(8), 0)
         }
-        heading(info, item.number, 16, dark, 0)
+        heading(info, item.number, TvoiceUi.LIST_TITLE_SP.toInt(), dark, 0).typeface = TvoiceUi.semiBold()
         sub(
             info,
-            "${if (item.direction == "Входящий") t("Входящий", "Воридотӣ") else t("Исходящий", "Содиротӣ")} • ${item.time}",
-            13,
-            muted,
+            if (missed) t("Пропущенный", "Аздастрафта") else if (item.direction == "Входящий") t("Входящий", "Воридотӣ") else t("Исходящий", "Содиротӣ"),
+            TvoiceUi.SECONDARY_SP.toInt(),
+            if (missed) red else muted,
             3
         )
         row.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
-        row.addView(View(this).apply { setBackgroundColor(line) }, LinearLayout.LayoutParams(dp(1), dp(34)))
-        row.addView(TextView(this).apply {
-            text = formatDuration(item.durationSeconds)
-            textSize = 14f
-            setTextColor(blue)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        }, LinearLayout.LayoutParams(dp(64), dp(48)).apply { leftMargin = dp(10) })
-        parent.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(9) })
+        val meta = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.END }
+        sub(meta, item.time, TvoiceUi.CAPTION_SP.toInt(), muted, 0).gravity = Gravity.END
+        sub(meta, if (item.durationSeconds > 0) formatDuration(item.durationSeconds) else "—", TvoiceUi.CAPTION_SP.toInt(), muted, 4).gravity = Gravity.END
+        row.addView(meta, LinearLayout.LayoutParams(dp(52), -2))
+        row.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_info)
+            setColorFilter(blue)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            contentDescription = t("Информация о звонке", "Маълумоти занг")
+            setOnClickListener { showCallInfo(item) }
+        }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin = dp(2) })
+        parent.addView(row, LinearLayout.LayoutParams(-1, dp(TvoiceUi.ROW_HEIGHT_DP)))
+        parent.addView(View(this).apply { setBackgroundColor(line) }, LinearLayout.LayoutParams(-1, dp(1)).apply { leftMargin = dp(52) })
+    }
+
+    private fun showCallInfo(item: CallHistoryItem) {
+        val favorites = preferences.getStringSet(PREF_FAVORITE_CALLS, emptySet()).orEmpty().toMutableSet()
+        val favorite = item.number in favorites
+        AlertDialog.Builder(this)
+            .setTitle(item.number)
+            .setItems(arrayOf(
+                t("Аудиозвонок", "Занги овозӣ"),
+                t("Видеозвонок", "Занги видеоӣ"),
+                if (favorite) t("Удалить из избранного", "Аз мунтахаб нест кардан") else t("Добавить в избранное", "Ба мунтахаб илова кардан")
+            )) { dialog, which ->
+                when (which) {
+                    0 -> placeCall(item.number)
+                    1 -> placeVideoCall(item.number)
+                    2 -> {
+                        if (favorite) favorites.remove(item.number) else favorites.add(item.number)
+                        preferences.edit().putStringSet(PREF_FAVORITE_CALLS, favorites).apply()
+                        showCalls()
+                    }
+                }
+                dialog.dismiss()
+            }
+            .show()
+    }
+
+    private fun callDayLabel(timestamp: Long): String {
+        val item = Calendar.getInstance().apply { timeInMillis = timestamp }
+        val today = Calendar.getInstance()
+        val yesterday = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
+        fun sameDay(a: Calendar, b: Calendar) = a.get(Calendar.YEAR) == b.get(Calendar.YEAR) && a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)
+        return when {
+            sameDay(item, today) -> t("Сегодня", "Имрӯз")
+            sameDay(item, yesterday) -> t("Вчера", "Дирӯз")
+            else -> SimpleDateFormat("dd MMMM", Locale.getDefault()).format(Date(timestamp))
+        }
     }
 
     private fun showContacts() {
         homePage = HomePage.Contacts
         currentChatPeer = null
-        createShell(); val body = screen()
-        heading(body, t("Контакты", "Тамосҳо"), 27, dark, 4)
-        sub(body, t("Телефонная книга устройства", "Дафтари тамосҳои телефон"), 14, muted, 5)
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
-            emptyState(body, R.drawable.ic_contacts, t("Разрешите доступ к контактам", "Дастрасӣ ба тамосҳоро иҷозат диҳед"), t("Tvoice покажет контакты только на этом устройстве", "Tvoice тамосҳои ҳамин телефонро нишон медиҳад"))
-            primaryButton(body, t("Разрешить доступ", "Иҷозат додан"), blue, 18) { ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_CONTACTS), 11) }
-            return
+        createShell()
+        val body = screen()
+        pageTitle(body, t("Контакты", "Тамосҳо"))
+        val merged = mutableListOf<Pair<String, String>>()
+        if (debugPreviewScreen == "contacts") {
+            merged.addAll(listOf("Алишер" to "73303", "Бахтиёр" to "73304", "Дилшод" to "73305", "Мунира" to "73306"))
         }
-        val contacts = loadContacts()
-        if (contacts.isEmpty()) emptyState(body, R.drawable.ic_contacts, t("Контакты не найдены", "Тамосҳо ёфт нашуданд"), t("Добавьте контакт в телефонную книгу", "Ба дафтари телефон тамос илова кунед"))
-        else contacts.forEach { (name, phone) -> contactCard(body, name, phone) }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+            merged.addAll(contactRepository.load().map { contact -> contact.name to contact.phone })
+        }
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        searchField(body, t("Поиск", "Ҷустуҷӯ"), contactSearch) { query ->
+            contactSearch = query
+            renderContactRows(list, merged, query)
+        }
+        body.addView(list, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        renderContactRows(list, merged, contactSearch)
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            val allow = TextView(this).apply {
+                text = t("Разрешить доступ к телефонной книге", "Дастрасӣ ба дафтари телефон")
+                TvoiceUi.style(this, TvoiceUi.BUTTON_SP, blue, TvoiceUi.semiBold())
+                gravity = Gravity.CENTER
+                background = TvoiceUi.ripple(this@MainActivity, TvoiceUi.color(this@MainActivity, R.color.tvoice_blue_soft), 10)
+                setOnClickListener { ActivityCompat.requestPermissions(this@MainActivity, arrayOf(Manifest.permission.READ_CONTACTS), 11) }
+            }
+            body.addView(allow, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(12) })
+        }
+
+        ChatClient.loadContacts { result ->
+            runOnUiThread {
+                result.getOrNull()?.forEach { contact ->
+                    if (merged.none { SipIdentity.normalize(it.second) == contact.sipNumber }) {
+                        merged += contact.displayName to contact.sipNumber
+                    }
+                }
+                renderContactRows(list, merged, contactSearch)
+            }
+        }
+        addContactFab()
     }
 
-    private fun contactCard(parent: LinearLayout, name: String, phone: String) {
+    private fun renderContactRows(parent: LinearLayout, contacts: List<Pair<String, String>>, query: String) {
+        parent.removeAllViews()
+        val normalizedQuery = query.trim().lowercase(Locale.getDefault())
+        val filtered = contacts.distinctBy { SipIdentity.normalize(it.second) }
+            .filter { (name, phone) -> normalizedQuery.isBlank() || name.lowercase(Locale.getDefault()).contains(normalizedQuery) || phone.contains(normalizedQuery) }
+            .sortedBy { (name, phone) -> name.ifBlank { phone }.lowercase(Locale.getDefault()) }
+        if (filtered.isEmpty()) {
+            sub(parent, t("Контакты не найдены", "Тамосҳо ёфт нашуданд"), TvoiceUi.SECONDARY_SP.toInt(), muted, 24).gravity = Gravity.CENTER
+            return
+        }
+        var group = ""
+        filtered.forEach { (name, phone) ->
+            val next = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "#"
+            if (next != group) {
+                sectionLabel(parent, next)
+                group = next
+            }
+            contactRow(parent, name, phone)
+        }
+    }
+
+    private fun contactRow(parent: LinearLayout, name: String, phone: String) {
         val normalized = phone.filter { it.isDigit() || it == '+' }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(11), dp(10), dp(11))
-            background = rounded(surface, dp(17).toFloat(), line, 1)
+            setPadding(0, dp(7), 0, dp(7))
+            background = TvoiceUi.ripple(this@MainActivity, surface, 0)
             setOnClickListener {
                 dialedNumber = normalized
                 showDialer()
@@ -508,30 +953,61 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         }
         val avatar = TextView(this).apply {
             text = avatarSymbols(name, normalized)
-            textSize = 16f
+            textSize = TvoiceUi.LIST_TITLE_SP
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            typeface = Typeface.DEFAULT_BOLD
-            background = rounded(cyan, dp(24).toFloat())
+            typeface = TvoiceUi.semiBold()
+            background = rounded(cyan, dp(20).toFloat())
         }
-        row.addView(avatar, LinearLayout.LayoutParams(dp(48), dp(48)))
+        row.addView(avatar, LinearLayout.LayoutParams(dp(40), dp(40)))
         val text = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(13), 0, dp(6), 0)
         }
-        heading(text, name.ifBlank { normalized }, 16, dark, 0)
-        sub(text, normalized, 13, muted, 3)
+        heading(text, name.ifBlank { normalized }, TvoiceUi.LIST_TITLE_SP.toInt(), dark, 0).apply {
+            typeface = TvoiceUi.semiBold()
+            maxLines = 1
+        }
+        sub(text, if (ChatClient.isConnected) t("Tvoice • доступен для чата", "Tvoice • барои чат дастрас") else normalized, TvoiceUi.SECONDARY_SP.toInt(), if (ChatClient.isConnected) green else muted, 3).maxLines = 1
         row.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
         val call = ImageView(this).apply {
             setImageResource(R.drawable.ic_call)
             setColorFilter(blue)
             setPadding(dp(10), dp(10), dp(10), dp(10))
             contentDescription = t("Позвонить", "Занг задан")
-            background = rounded(if (isDarkTheme) Color.rgb(30, 58, 110) else Color.rgb(237, 243, 255), dp(22).toFloat())
+            background = TvoiceUi.ripple(this@MainActivity, Color.TRANSPARENT, 22)
             setOnClickListener { placeCall(normalized) }
         }
         row.addView(call, LinearLayout.LayoutParams(dp(44), dp(44)))
-        parent.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(9) })
+        row.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_videocam)
+            setColorFilter(blue)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            contentDescription = t("Видеозвонок", "Занги видеоӣ")
+            background = TvoiceUi.ripple(this@MainActivity, Color.TRANSPARENT, 22)
+            setOnClickListener { placeVideoCall(normalized) }
+        }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin = dp(6) })
+        parent.addView(row, LinearLayout.LayoutParams(-1, dp(TvoiceUi.ROW_HEIGHT_DP)))
+        parent.addView(View(this).apply { setBackgroundColor(line) }, LinearLayout.LayoutParams(-1, dp(1)).apply { leftMargin = dp(52) })
+    }
+
+    private fun addContactFab() {
+        val button = ImageView(this).apply {
+            setImageResource(R.drawable.ic_add)
+            setColorFilter(Color.WHITE)
+            setPadding(dp(15), dp(15), dp(15), dp(15))
+            contentDescription = t("Добавить контакт", "Илова кардани тамос")
+            background = rounded(blue, dp(TvoiceUi.FAB_DP / 2).toFloat())
+            elevation = dp(5).toFloat()
+            setOnClickListener {
+                val intent = Intent(Intent.ACTION_INSERT, ContactsContract.Contacts.CONTENT_URI)
+                runCatching { startActivity(intent) }.onFailure { showNewChatDialog() }
+            }
+        }
+        rootContainer.addView(button, FrameLayout.LayoutParams(dp(TvoiceUi.FAB_DP), dp(TvoiceUi.FAB_DP), Gravity.END or Gravity.BOTTOM).apply {
+            rightMargin = dp(16)
+            bottomMargin = dp(74)
+        })
     }
 
     private fun addDialFab() {
@@ -546,9 +1022,9 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         }
         rootContainer.addView(
             button,
-            FrameLayout.LayoutParams(dp(60), dp(60), Gravity.END or Gravity.BOTTOM).apply {
-                rightMargin = dp(20)
-                bottomMargin = dp(92)
+            FrameLayout.LayoutParams(dp(TvoiceUi.FAB_DP), dp(TvoiceUi.FAB_DP), Gravity.END or Gravity.BOTTOM).apply {
+                rightMargin = dp(16)
+                bottomMargin = dp(74)
             }
         )
     }
@@ -560,6 +1036,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
             return
         }
         try {
+            callUiMinimized = false
             beginHistory(normalized, "Исходящий")
             sip.call(normalized)
         } catch (e: Exception) {
@@ -568,57 +1045,48 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         }
     }
 
-    private fun beginHistory(number: String, direction: String) {
-        if (activeHistoryItem != null) return
-        connectedAtMillis = null
-        HistoryItem(number, direction, now()).also {
-            activeHistoryItem = it
-            callHistory.add(0, it)
+    private fun placeVideoCall(number: String) {
+        val normalized = number.filter { it.isDigit() || it == '+' }
+        if (normalized.isBlank()) {
+            toast(t("Номер контакта не указан", "Рақами тамос нишон дода нашудааст"))
+            return
         }
-        saveCallHistory()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            pendingVideoNumber = normalized
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 15)
+            return
+        }
+        startVideoCall(normalized)
+    }
+
+    private fun startVideoCall(number: String) {
+        if (!ChatClient.isConnected) {
+            toast(t("Чат-сервер ещё подключается", "Сервери чат ҳоло пайваст мешавад"))
+            ChatClient.reconnect()
+            return
+        }
+        beginHistory(number, "Исходящий видео")
+        ChatClient.startVideoCall(number) { result ->
+            result.onSuccess { credentials ->
+                finishHistory()
+                startActivity(VideoCallActivity.outgoingIntent(this, credentials))
+            }.onFailure { error ->
+                finishHistory()
+                toast(error.message ?: t("Ошибка видеовызова", "Хатои занги видеоӣ"))
+            }
+        }
+    }
+
+    private fun beginHistory(number: String, direction: String) {
+        callHistoryTracker.begin(number, direction, now())
     }
 
     private fun finishHistory() {
-        val item = activeHistoryItem ?: return
-        connectedAtMillis?.let { started ->
-            item.durationSeconds = ((System.currentTimeMillis() - started) / 1000L).coerceAtLeast(1L)
-        }
-        connectedAtMillis = null
-        activeHistoryItem = null
-        saveCallHistory()
+        callHistoryTracker.finish(System.currentTimeMillis())
     }
 
     private fun loadCallHistory() {
-        if (callHistory.isNotEmpty()) return
-        runCatching {
-            val source = preferences.getString("call_history", "[]").orEmpty()
-            val items = org.json.JSONArray(source)
-            for (index in 0 until items.length()) {
-                val item = items.getJSONObject(index)
-                callHistory += HistoryItem(
-                    number = item.optString("number"),
-                    direction = item.optString("direction"),
-                    time = item.optString("time"),
-                    durationSeconds = item.optLong("duration", 0L)
-                )
-            }
-        }
-    }
-
-    private fun saveCallHistory() {
-        runCatching {
-            val items = org.json.JSONArray()
-            callHistory.take(100).forEach { item ->
-                items.put(
-                    org.json.JSONObject()
-                        .put("number", item.number)
-                        .put("direction", item.direction)
-                        .put("time", item.time)
-                        .put("duration", item.durationSeconds)
-                )
-            }
-            preferences.edit().putString("call_history", items.toString()).apply()
-        }
+        callHistoryTracker.load()
     }
 
     private fun avatarSymbols(name: String, number: String): String {
@@ -638,65 +1106,112 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         if (refresh) ChatClient.syncAll()
         createShell()
         val body = screen()
-        heading(body, t("Чат", "Чат"), 27, dark, 0)
+        pageTitle(body, t("Чаты", "Чатҳо"))
         val chatStatus = if (ChatClient.isConnected) {
             t("В сети", "Дар шабака")
         } else {
             ChatClient.stateMessage.ifBlank { t("Подключение…", "Пайвастшавӣ…") }
         }
-        sub(
-            body,
-            "${t("Сообщения между абонентами Tvoice", "Паёмҳо байни муштариёни Tvoice")} • $chatStatus",
-            14,
-            if (ChatClient.isConnected) green else muted,
-            5
-        )
-        val conversations = ChatStore.conversations(ownNumber)
-        if (conversations.isEmpty()) {
-            emptyState(
-                body,
-                R.drawable.ic_chat,
-                t("Сообщений пока нет", "Ҳоло паём нест"),
-                t("Начните чат по SIP-номеру абонента", "Чатро бо рақами SIP-и муштарӣ оғоз кунед")
-            )
-        } else {
-            conversations.forEach { chat ->
-                val unread = if (chat.unread > 0) " • ${chat.unread}" else ""
-                listCard(body, chat.peer, "${chat.preview.take(45)}$unread", blue) { showConversation(chat.peer) }
-            }
+        sub(body, chatStatus, TvoiceUi.CAPTION_SP.toInt(), if (ChatClient.isConnected) green else muted, 3)
+        val conversations = if (debugPreviewScreen == "chats") listOf(
+            ChatConversation("73303", t("Буду через пять минут", "Пас аз панҷ дақиқа"), System.currentTimeMillis(), 2),
+            ChatConversation("73304", t("Документ отправлен", "Ҳуҷҷат фиристода шуд"), System.currentTimeMillis() - 3_600_000L, 0),
+            ChatConversation("73305", t("Спасибо!", "Ташаккур!"), System.currentTimeMillis() - 86_400_000L, 0)
+        ) else ChatStore.conversations(chatOwner)
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        searchField(body, t("Поиск чатов", "Ҷустуҷӯи чатҳо"), chatSearch) { query ->
+            chatSearch = query
+            renderChatRows(list, conversations, query)
         }
+        body.addView(list, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        renderChatRows(list, conversations, chatSearch)
         body.addView(Space(this), LinearLayout.LayoutParams(1, dp(74)))
         addNewChatFab()
     }
 
+    private fun renderChatRows(parent: LinearLayout, conversations: List<ChatConversation>, query: String) {
+        parent.removeAllViews()
+        val filtered = conversations.filter { chat ->
+            query.isBlank() || chat.peer.contains(query, true) || chat.preview.contains(query, true)
+        }
+        if (filtered.isEmpty()) {
+            emptyState(parent, R.drawable.ic_chat, t("Сообщений пока нет", "Ҳоло паём нест"), t("Начните чат по SIP-номеру абонента", "Чатро бо рақами SIP-и муштарӣ оғоз кунед"))
+            return
+        }
+        filtered.forEach { chat -> chatConversationRow(parent, chat) }
+    }
+
+    private fun chatConversationRow(parent: LinearLayout, chat: ChatConversation) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, dp(8))
+            background = TvoiceUi.ripple(this@MainActivity, surface, 0)
+            setOnClickListener { showConversation(chat.peer) }
+        }
+        val avatarWrap = FrameLayout(this)
+        avatarWrap.addView(TextView(this).apply {
+            text = avatarSymbols("", chat.peer)
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            TvoiceUi.style(this, TvoiceUi.LIST_TITLE_SP, Color.WHITE, TvoiceUi.semiBold())
+            background = rounded(blue, dp(20).toFloat())
+        }, FrameLayout.LayoutParams(dp(40), dp(40)))
+        if (ChatClient.isConnected) {
+            avatarWrap.addView(View(this).apply { background = rounded(green, dp(5).toFloat()) }, FrameLayout.LayoutParams(dp(10), dp(10), Gravity.END or Gravity.BOTTOM).apply {
+                rightMargin = dp(1); bottomMargin = dp(1)
+            })
+        }
+        row.addView(avatarWrap, LinearLayout.LayoutParams(dp(40), dp(40)))
+        val labels = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, dp(8), 0) }
+        heading(labels, chat.peer, TvoiceUi.LIST_TITLE_SP.toInt(), dark, 0).apply { typeface = TvoiceUi.semiBold(); maxLines = 1 }
+        sub(labels, chat.preview.ifBlank { t("Вложение", "Замима") }, TvoiceUi.SECONDARY_SP.toInt(), muted, 4).apply {
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        row.addView(labels, LinearLayout.LayoutParams(0, -2, 1f))
+        val meta = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.END }
+        sub(meta, formatTime(chat.timestamp), TvoiceUi.CAPTION_SP.toInt(), muted, 0).gravity = Gravity.END
+        if (chat.unread > 0) {
+            meta.addView(TextView(this).apply {
+                text = chat.unread.coerceAtMost(99).toString()
+                TvoiceUi.style(this, 10f, Color.WHITE, TvoiceUi.medium())
+                gravity = Gravity.CENTER
+                background = rounded(blue, dp(9).toFloat())
+            }, LinearLayout.LayoutParams(dp(18), dp(18)).apply { gravity = Gravity.END; topMargin = dp(4) })
+        }
+        row.addView(meta, LinearLayout.LayoutParams(dp(44), -2))
+        parent.addView(row, LinearLayout.LayoutParams(-1, dp(TvoiceUi.ROW_HEIGHT_DP)))
+        parent.addView(View(this).apply { setBackgroundColor(line) }, LinearLayout.LayoutParams(-1, dp(1)).apply { leftMargin = dp(52) })
+    }
+
     private fun addNewChatFab() {
         val button = ImageView(this).apply {
-            setImageResource(R.drawable.ic_chat)
+            setImageResource(R.drawable.ic_new_chat)
             setColorFilter(Color.WHITE)
             setPadding(dp(17), dp(17), dp(17), dp(17))
             contentDescription = t("Новый чат", "Чати нав")
-            background = rounded(blue, dp(30).toFloat())
-            elevation = dp(9).toFloat()
+            background = rounded(blue, dp(TvoiceUi.FAB_DP / 2).toFloat())
+            elevation = dp(5).toFloat()
             setOnClickListener { showNewChatDialog() }
         }
         content.addView(
             button,
-            FrameLayout.LayoutParams(dp(60), dp(60), Gravity.END or Gravity.BOTTOM).apply {
-                rightMargin = dp(20)
-                bottomMargin = dp(18)
+            FrameLayout.LayoutParams(dp(TvoiceUi.FAB_DP), dp(TvoiceUi.FAB_DP), Gravity.END or Gravity.BOTTOM).apply {
+                rightMargin = dp(16)
+                bottomMargin = dp(10)
             }
         )
     }
 
     private fun showNewChatDialog() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_CONTACTS), 14)
-            return
+        val contacts = mutableListOf<Pair<String, String>>()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+            contacts += contactRepository.load().mapNotNull { (name, phone) ->
+                runCatching { SipIdentity.requireValid(phone) }.getOrNull()?.let { name to it }
+            }
         }
-
-        val contacts = loadContacts().map { (name, phone) ->
-            name to phone.filter { it.isDigit() || it == '+' }
-        }.filter { it.second.isNotBlank() }
+        lateinit var dialog: AlertDialog
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(8), dp(18), dp(12))
@@ -727,6 +1242,24 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         }
         panel.addView(addContact, LinearLayout.LayoutParams(-1, dp(50)).apply { topMargin = dp(6) })
 
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            panel.addView(TextView(this).apply {
+                text = t("Разрешить телефонную книгу", "Иҷозати дафтари телефон")
+                textSize = 14f
+                setTextColor(blue)
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), 0, dp(12), 0)
+                setOnClickListener {
+                    dialog.dismiss()
+                    ActivityCompat.requestPermissions(
+                        this@MainActivity,
+                        arrayOf(Manifest.permission.READ_CONTACTS),
+                        14
+                    )
+                }
+            }, LinearLayout.LayoutParams(-1, dp(44)))
+        }
+
         val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val scroll = ScrollView(this).apply { addView(results) }
         val listHeight = (resources.displayMetrics.heightPixels * 0.48f)
@@ -734,12 +1267,11 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
             .coerceIn(dp(220), dp(420))
         panel.addView(scroll, LinearLayout.LayoutParams(-1, listHeight))
 
-        lateinit var dialog: AlertDialog
         fun render(queryValue: String) {
             results.removeAllViews()
             val query = queryValue.trim()
-            val normalizedQuery = query.filter { it.isDigit() || it == '+' }
-            if (normalizedQuery.length >= 2 && contacts.none { it.second == normalizedQuery }) {
+            val normalizedQuery = runCatching { SipIdentity.requireValid(query) }.getOrNull()
+            if (normalizedQuery != null && contacts.none { it.second == normalizedQuery }) {
                 chatContactRow(
                     results,
                     t("Написать абоненту", "Ба муштарӣ нависед"),
@@ -778,6 +1310,17 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         render("")
         dialog.show()
         search.requestFocus()
+        ChatClient.loadContacts { result ->
+            result.onSuccess { serverContacts ->
+                serverContacts.asReversed().forEach { contact ->
+                    contacts.removeAll { it.second == contact.sipNumber }
+                    contacts.add(0, contact.displayName to contact.sipNumber)
+                }
+                if (dialog.isShowing) render(search.text?.toString().orEmpty())
+            }.onFailure { error ->
+                if (dialog.isShowing) toast(error.message ?: t("Не удалось загрузить контакты чата", "Тамосҳои чат бор нашуданд"))
+            }
+        }
     }
 
     private fun chatContactRow(
@@ -819,84 +1362,186 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         })
     }
 
-    private fun showConversation(peer: String, refresh: Boolean = true) {
+    private fun showConversation(peerValue: String, refresh: Boolean = true) {
+        val peer = runCatching { SipIdentity.requireValid(peerValue) }.getOrNull()
+        if (peer == null) {
+            toast(t("Некорректный номер абонента", "Рақами муштарӣ нодуруст аст"))
+            return
+        }
         homePage = HomePage.Chat
         currentChatPeer = peer
-        ChatStore.markRead(ownNumber, peer)
+        if (ChatStore.markRead(chatOwner, peer)) ChatClient.markConversationRead(peer)
         if (refresh) ChatClient.syncConversation(peer)
         createShell()
-        val body = screen(false).apply { setPadding(dp(14), dp(8), dp(14), dp(12)) }
-        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val back = TextView(this).apply {
-            text = "‹"
-            textSize = 34f
-            setTextColor(blue)
-            gravity = Gravity.CENTER
+        // Edge-to-edge layouts are not resized consistently by OEM keyboards.
+        // This screen applies the IME inset itself so the composer always stays
+        // immediately above the keyboard without a duplicated global offset.
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+        val body = screen(false).apply {
+            setPadding(dp(10), 0, dp(10), 0)
+            setBackgroundColor(TvoiceUi.color(this@MainActivity, R.color.tvoice_chat_background))
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 0)
+            setBackgroundColor(surface)
+        }
+        val back = ImageView(this).apply {
+            setImageResource(R.drawable.ic_back)
+            setColorFilter(blue)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            contentDescription = t("Назад", "Бозгашт")
             setOnClickListener { showChats() }
         }
-        header.addView(back, LinearLayout.LayoutParams(dp(44), dp(48)))
+        header.addView(back, LinearLayout.LayoutParams(dp(44), dp(54)))
+        header.addView(TextView(this).apply {
+            text = avatarSymbols("", peer)
+            gravity = Gravity.CENTER
+            TvoiceUi.style(this, TvoiceUi.SECONDARY_SP, Color.WHITE, TvoiceUi.semiBold())
+            background = rounded(blue, dp(18).toFloat())
+        }, LinearLayout.LayoutParams(dp(36), dp(36)))
         val headerText = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        heading(headerText, peer, 19, dark, 0)
-        sub(headerText, t("SIP-абонент", "Муштарии SIP"), 12, green, 1)
-        header.addView(headerText, LinearLayout.LayoutParams(0, -2, 1f))
-        body.addView(header, LinearLayout.LayoutParams(-1, dp(56)))
+        heading(headerText, peer, TvoiceUi.LIST_TITLE_SP.toInt(), dark, 0).apply { typeface = TvoiceUi.semiBold(); maxLines = 1 }
+        sub(headerText, if (ChatClient.isConnected) t("Онлайн", "Онлайн") else t("Не в сети", "Офлайн"), TvoiceUi.CAPTION_SP.toInt(), if (ChatClient.isConnected) green else muted, 2)
+        header.addView(headerText, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(9) })
+        header.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_call)
+            setColorFilter(blue)
+            setPadding(dp(9), dp(9), dp(9), dp(9))
+            contentDescription = t("Аудиозвонок", "Занги овозӣ")
+            setOnClickListener { placeCall(peer) }
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        header.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_videocam)
+            setColorFilter(blue)
+            setPadding(dp(9), dp(9), dp(9), dp(9))
+            contentDescription = t("Видеозвонок", "Занги видеоӣ")
+            setOnClickListener { placeVideoCall(peer) }
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        header.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_more)
+            setColorFilter(blue)
+            setPadding(dp(11), dp(11), dp(11), dp(11))
+            contentDescription = t("Меню", "Меню")
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        body.addView(header, LinearLayout.LayoutParams(-1, dp(54)))
+        body.addView(View(this).apply { setBackgroundColor(line) }, LinearLayout.LayoutParams(-1, dp(1)))
 
         val messagesColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(6), 0, dp(8))
+            setPadding(dp(2), dp(8), dp(2), dp(8))
         }
-        ChatStore.messages(ownNumber, peer).forEach { message -> addMessageBubble(messagesColumn, message) }
         val scroll = ScrollView(this).apply {
             isFillViewport = true
             addView(messagesColumn)
         }
+        activeConversationMessages = messagesColumn
+        activeConversationScroll = scroll
+        refreshOpenConversation()
         body.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
 
-        val composer = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val emoji = TextView(this).apply {
-            text = "☺"
-            textSize = 24f
-            setTextColor(blue)
-            gravity = Gravity.CENTER
-            contentDescription = t("Смайлики", "Табассумҳо")
+        val composer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(3), 0, dp(3))
+            setBackgroundColor(surface)
         }
-        composer.addView(emoji, LinearLayout.LayoutParams(dp(40), dp(48)))
         val attach = ImageView(this).apply {
-            setImageResource(R.drawable.ic_attach)
+            setImageResource(R.drawable.ic_add)
             setColorFilter(blue)
-            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setPadding(dp(11), dp(11), dp(11), dp(11))
             contentDescription = t("Фото или файл", "Акс ё файл")
             setOnClickListener { chooseChatAttachment(peer) }
         }
-        composer.addView(attach, LinearLayout.LayoutParams(dp(40), dp(48)))
+        composer.addView(attach, LinearLayout.LayoutParams(dp(44), dp(48)))
         val input = EditText(this).apply {
-            hint = t("Сообщение", "Паём")
-            textSize = 16f
-            setTextColor(dark)
+            hint = t("Сообщение...", "Паём...")
+            TvoiceUi.style(this, TvoiceUi.BODY_SP, dark)
             setHintTextColor(muted)
             maxLines = 4
-            setPadding(dp(15), 0, dp(15), 0)
-            background = rounded(surface, dp(22).toFloat(), line, 1)
+            setPadding(dp(12), 0, dp(10), 0)
+            background = rounded(TvoiceUi.color(this@MainActivity, R.color.tvoice_search), dp(12).toFloat())
         }
-        emoji.setOnClickListener { showEmojiPicker(input) }
         composer.addView(input, LinearLayout.LayoutParams(0, dp(48), 1f))
-        val send = TextView(this).apply {
-            text = "➤"
-            textSize = 23f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
+        val emoji = ImageView(this).apply {
+            setImageResource(R.drawable.ic_emoji)
+            setColorFilter(blue)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            contentDescription = t("Смайлики", "Табассумҳо")
+            setOnClickListener { showEmojiPicker(input) }
+        }
+        composer.addView(emoji, LinearLayout.LayoutParams(dp(40), dp(48)))
+        composer.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_camera)
+            setColorFilter(blue)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            contentDescription = t("Отправить фото", "Ирсоли акс")
+            setOnClickListener { chooseChatPhoto(peer) }
+        }, LinearLayout.LayoutParams(dp(40), dp(48)))
+        val send = ImageView(this).apply {
+            setImageResource(R.drawable.ic_send)
+            setColorFilter(Color.WHITE)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
             background = rounded(blue, dp(24).toFloat())
             setOnClickListener {
                 val text = input.text.toString().trim()
                 if (text.isBlank()) return@setOnClickListener
                 runCatching { sip.sendMessage(peer, text) }
-                    .onSuccess { input.text.clear(); showConversation(peer, refresh = false) }
+                    .onSuccess { input.text.clear() }
                     .onFailure { toast(it.message ?: t("Ошибка отправки", "Хатои ирсол")) }
             }
         }
         composer.addView(send, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(8) })
-        body.addView(composer, LinearLayout.LayoutParams(-1, dp(52)))
+        body.addView(composer, LinearLayout.LayoutParams(-1, dp(54)))
+        ViewCompat.setOnApplyWindowInsetsListener(composer) { view, insets ->
+            val imeBottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            val systemBottom = insets.getInsetsIgnoringVisibility(
+                WindowInsetsCompat.Type.systemBars()
+            ).bottom
+            val keyboardOffset = (imeBottom - systemBottom).coerceAtLeast(0)
+            val params = view.layoutParams as LinearLayout.LayoutParams
+            if (params.bottomMargin != keyboardOffset) {
+                params.bottomMargin = keyboardOffset
+                view.layoutParams = params
+                scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+            }
+            insets
+        }
+        input.setOnFocusChangeListener { _, focused ->
+            if (focused) composer.post { ViewCompat.requestApplyInsets(composer) }
+        }
+        composer.post { ViewCompat.requestApplyInsets(composer) }
         scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun refreshOpenConversation(): Boolean {
+        val peer = currentChatPeer ?: return false
+        val messagesColumn = activeConversationMessages ?: return false
+        val scroll = activeConversationScroll ?: return false
+        messagesColumn.removeAllViews()
+        var previousDay = ""
+        ChatStore.messages(chatOwner, peer).forEach { message ->
+            val day = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault()).format(Date(message.timestamp))
+            if (day != previousDay) {
+                addChatDate(messagesColumn, message.timestamp)
+                previousDay = day
+            }
+            addMessageBubble(messagesColumn, message)
+        }
+        scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+        return true
+    }
+
+    private fun addChatDate(parent: LinearLayout, timestamp: Long) {
+        val label = TextView(this).apply {
+            text = SimpleDateFormat("dd MMMM", Locale.getDefault()).format(Date(timestamp))
+            TvoiceUi.style(this, TvoiceUi.CAPTION_SP, muted, TvoiceUi.medium())
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            background = rounded(TvoiceUi.color(this@MainActivity, R.color.tvoice_search), dp(10).toFloat())
+        }
+        parent.addView(label, LinearLayout.LayoutParams(-2, dp(26)).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(6); bottomMargin = dp(4) })
     }
 
     private fun showEmojiPicker(input: EditText) {
@@ -959,30 +1604,66 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         startActivityForResult(intent, REQUEST_CHAT_ATTACHMENT)
     }
 
+    private fun chooseChatPhoto(peer: String) {
+        pendingChatAttachmentPeer = peer
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            type = "image/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        startActivityForResult(intent, REQUEST_CHAT_ATTACHMENT)
+    }
+
     private fun addMessageBubble(parent: LinearLayout, message: ChatMessage) {
         val row = FrameLayout(this)
         val bubble = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(13), dp(9), dp(13), dp(7))
-            background = rounded(if (message.incoming) surface else blue, dp(16).toFloat())
+            setPadding(dp(9), dp(7), dp(9), dp(7))
+            background = rounded(
+                TvoiceUi.color(this@MainActivity, if (message.incoming) R.color.tvoice_incoming_bubble else R.color.tvoice_outgoing_bubble),
+                dp(14).toFloat()
+            )
         }
         if (message.attachmentName != null) {
             addAttachmentPreview(bubble, message)
         } else {
-            sub(bubble, message.text, 15, if (message.incoming) dark else Color.WHITE, 0)
+            sub(bubble, message.text, TvoiceUi.BODY_SP.toInt(), if (message.incoming) dark else TvoiceUi.color(this, R.color.tvoice_outgoing_text), 0)
         }
-        val status = when (message.status) {
+        val status = if (message.incoming) "" else when (message.status) {
             "sending" -> "…"
-            "failed" -> "!"
+            "failed" -> t("!  Нажмите для повтора", "!  Барои такрор зер кунед")
+            "delivered" -> "✓✓"
+            "read" -> "✓✓"
             else -> "✓"
+        }
+        val statusColor = when {
+            message.incoming -> muted
+            message.status == "read" -> dark
+            else -> Color.rgb(210, 226, 255)
         }
         sub(
             bubble,
-            "${formatTime(message.timestamp)} $status",
+            "${formatTime(message.timestamp)}${if (status.isBlank()) "" else "  $status"}",
             10,
-            if (message.incoming) muted else Color.rgb(210, 226, 255),
+            statusColor,
             3
         ).gravity = Gravity.END
+        if (message.status == "failed") {
+            sub(
+                bubble,
+                message.deliveryError ?: t("Сообщение не доставлено", "Паём нарасид"),
+                10,
+                if (message.incoming) red else Color.rgb(255, 220, 220),
+                3
+            )
+            if (message.attachmentName == null) {
+                bubble.setOnClickListener {
+                    runCatching { ChatClient.retryMessage(message) }
+                        .onSuccess { refreshOpenConversation() }
+                        .onFailure { toast(it.message ?: t("Повторная отправка не удалась", "Ирсоли такрорӣ нашуд")) }
+                }
+            }
+        }
         row.addView(
             bubble,
             FrameLayout.LayoutParams(-2, -2, if (message.incoming) Gravity.START else Gravity.END).apply {
@@ -1023,20 +1704,22 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
                 }
             }
         }
-        val label = TextView(this).apply {
-            val icon = when {
-                message.attachmentMime?.startsWith("image/") == true -> "🖼"
-                message.attachmentMime?.startsWith("video/") == true -> "🎬"
-                message.attachmentMime?.startsWith("audio/") == true -> "🎵"
-                else -> "📎"
-            }
-            text = "$icon  ${message.attachmentName}\n${formatFileSize(message.attachmentSize)}"
-            textSize = 14f
-            setTextColor(foreground)
+        val fileRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(7), 0, dp(2))
             setOnClickListener { openAttachment(message) }
         }
-        parent.addView(label, LinearLayout.LayoutParams(-2, -2))
+        fileRow.addView(ImageView(this).apply {
+            setImageResource(if (message.attachmentMime?.startsWith("image/") == true) R.drawable.ic_camera else R.drawable.ic_file)
+            setColorFilter(foreground)
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }, LinearLayout.LayoutParams(dp(36), dp(36)))
+        val fileText = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(7), 0, 0, 0) }
+        heading(fileText, message.attachmentName.orEmpty(), TvoiceUi.BODY_SP.toInt(), foreground, 0).maxLines = 1
+        sub(fileText, formatFileSize(message.attachmentSize), TvoiceUi.CAPTION_SP.toInt(), secondary, 2)
+        fileRow.addView(fileText, LinearLayout.LayoutParams(0, -2, 1f))
+        parent.addView(fileRow, LinearLayout.LayoutParams(dp(210), -2))
     }
 
     private fun decodeChatPreview(file: File) = runCatching {
@@ -1071,23 +1754,128 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         else -> String.format(Locale.getDefault(), "%.1f МБ", size / 1024.0 / 1024.0)
     }
 
-    private fun loadContacts(): List<Pair<String, String>> {
-        val result = mutableListOf<Pair<String, String>>()
-        val cursor = contentResolver.query(ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-            arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER), null, null,
-            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC")
-        cursor?.use {
-            val nameIndex = it.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
-            val phoneIndex = it.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
-            while (it.moveToNext() && result.size < 100) result += it.getString(nameIndex) to it.getString(phoneIndex)
+    private fun showAccount() = showProfile()
+
+    private fun showProfile() {
+        homePage = HomePage.Profile
+        currentChatPeer = null
+        createShell()
+        val body = screen()
+        pageTitle(body, t("Аккаунт", "Ҳисоб"))
+
+        val profile = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(12), 0, dp(14))
         }
-        return result.distinct()
+        val photoWrap = FrameLayout(this).apply {
+            background = rounded(blue, dp(32).toFloat())
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { choosePhoto() }
+        }
+        profileImage = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            if (profileUri != null) setImageURI(profileUri) else {
+                setImageResource(R.drawable.ic_account)
+                setColorFilter(Color.WHITE)
+                setPadding(dp(16), dp(16), dp(16), dp(16))
+            }
+            contentDescription = t("Изменить фото", "Иваз кардани акс")
+        }
+        photoWrap.addView(profileImage, FrameLayout.LayoutParams(-1, -1))
+        profile.addView(photoWrap, LinearLayout.LayoutParams(dp(64), dp(64)))
+        val identity = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), 0, 0, 0)
+        }
+        heading(identity, ownNumber, 20, dark, 0).typeface = TvoiceUi.semiBold()
+        sub(identity, t("● Подключено", "● Пайваст"), TvoiceUi.SECONDARY_SP.toInt(), green, 4)
+        sub(identity, if (ChatClient.isConnected) t("Чат подключён", "Чат пайваст") else ChatClient.stateMessage.ifBlank { t("Подключение чата…", "Пайвастшавии чат…") }, TvoiceUi.CAPTION_SP.toInt(), muted, 3)
+        profile.addView(identity, LinearLayout.LayoutParams(0, -2, 1f))
+        body.addView(profile, LinearLayout.LayoutParams(-1, dp(92)))
+
+        sectionLabel(body, t("Аккаунты", "Ҳисобҳо"))
+        val numbers = (TvoiceRuntime.accountUsernames() + ownNumber)
+            .filter { it.isNotBlank() }
+            .distinct()
+        numbers.forEach { number ->
+            profileSettingRow(
+                body,
+                R.drawable.ic_account,
+                number,
+                if (number == ownNumber) t("Активный", "Фаъол") else t("Переключить", "Гузариш")
+            ) {
+                if (number != ownNumber) {
+                    runCatching { sip.selectAccount(number) }
+                        .onSuccess { ownNumber = number; showProfile() }
+                        .onFailure { toast(it.message ?: t("Ошибка аккаунта", "Хатои ҳисоб")) }
+                }
+            }
+        }
+        profileSettingRow(body, R.drawable.ic_add, t("Добавить аккаунт", "Илова кардани ҳисоб"), "") { showAddAccountDialog() }
+
+        sectionLabel(body, t("Настройки", "Танзимот"))
+        profileSettingRow(body, R.drawable.ic_chat, t("Уведомления", "Огоҳиномаҳо"), notificationSettingsSummary()) { showNotificationSettingsDialog() }
+        profileSettingRow(body, R.drawable.ic_speaker, t("Звук и устройства", "Овоз ва дастгоҳҳо"), soundSettingsSummary()) { showSoundSettingsDialog() }
+        profileSettingRow(body, R.drawable.ic_contacts, t("Язык", "Забон"), if (isTajik) "Тоҷикӣ" else "Русский") { showLanguageDialog() }
+        profileSettingRow(body, R.drawable.ic_tvoice, t("Оформление", "Намуди зоҳирӣ"), themeModeLabel()) { showThemeDialog() }
+        profileSettingRow(body, R.drawable.ic_info, t("SIP-сервер", "Сервери SIP"), "185.177.2.115 • UDP") { }
+
+        sectionLabel(body, t("О приложении", "Дар бораи барнома"))
+        sub(body, t(
+            "Tvoice — звонки и сообщения между абонентами вашего SIP-сервера.",
+            "Tvoice — зангҳо ва паёмҳо байни муштариёни сервери SIP."
+        ), TvoiceUi.SECONDARY_SP.toInt(), muted, 4)
+        sub(body, appVersionLabel(), TvoiceUi.SECONDARY_SP.toInt(), blue, 8)
+        sub(body, "Developed by Шогирдои Малем", TvoiceUi.SECONDARY_SP.toInt(), dark, 5).typeface = TvoiceUi.semiBold()
+        compactButton(body, t("Выйти из аккаунта", "Баромадан аз ҳисоб"), red) {
+            sip.logout()
+            stopService(Intent(this, TvoiceCallService::class.java))
+            ownNumber = ""
+            pendingPassword = ""
+            showLogin()
+        }
     }
 
-    private fun showAccount() = showAccountDrawer()
+    private fun profileSettingRow(parent: LinearLayout, icon: Int, title: String, value: String, action: () -> Unit) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 0)
+            background = TvoiceUi.ripple(this@MainActivity, surface, 0)
+            setOnClickListener { action() }
+        }
+        row.addView(ImageView(this).apply {
+            setImageResource(icon)
+            setColorFilter(blue)
+            setPadding(dp(11), dp(11), dp(11), dp(11))
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        row.addView(TextView(this).apply {
+            text = title
+            TvoiceUi.style(this, TvoiceUi.BODY_SP, dark, TvoiceUi.medium())
+            gravity = Gravity.CENTER_VERTICAL
+        }, LinearLayout.LayoutParams(0, -1, 1f).apply { leftMargin = dp(6) })
+        if (value.isNotBlank()) {
+            row.addView(TextView(this).apply {
+                text = value
+                maxLines = 1
+                TvoiceUi.style(this, TvoiceUi.SECONDARY_SP, muted)
+                gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            }, LinearLayout.LayoutParams(-2, -1).apply { rightMargin = dp(2) })
+        }
+        row.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_chevron_right)
+            setColorFilter(muted)
+            setPadding(dp(13), dp(13), dp(13), dp(13))
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        parent.addView(row, LinearLayout.LayoutParams(-1, dp(54)))
+        parent.addView(View(this).apply { setBackgroundColor(line) }, LinearLayout.LayoutParams(-1, dp(1)).apply { leftMargin = dp(50) })
+    }
 
     private fun showAccountDrawer() {
         if (!::rootContainer.isInitialized) return
+        if (activeDrawerOverlay != null) return
         val overlay = FrameLayout(this).apply { setBackgroundColor(Color.TRANSPARENT) }
         val scrim = View(this).apply { setBackgroundColor(Color.argb(105, 2, 8, 23)) }
         overlay.addView(scrim, FrameLayout.LayoutParams(-1, -1))
@@ -1139,7 +1927,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         scrollBody.addView(profile, LinearLayout.LayoutParams(-1, -2))
 
         compactSection(scrollBody, t("Аккаунты", "Ҳисобҳо"))
-        val numbers = (accountNumbers + ownNumber).filter { it.isNotBlank() }.distinct()
+        val numbers = (TvoiceRuntime.accountUsernames() + ownNumber).filter { it.isNotBlank() }.distinct()
         numbers.forEach { number ->
             compactSetting(
                 scrollBody,
@@ -1181,7 +1969,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         compactSetting(
             scrollBody,
             t("Оформление", "Намуди зоҳирӣ"),
-            if (isDarkTheme) t("Тёмная", "Торик") else t("Светлая", "Равшан"),
+            themeModeLabel(),
             blue
         ) { showThemeDialog() }
         compactSetting(scrollBody, t("SIP-сервер", "Сервери SIP"), "185.177.2.115 • UDP", green) { }
@@ -1197,7 +1985,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
             muted,
             2
         )
-        sub(scrollBody, "Tvoice 0.9.0 • SIP Core 1.3 • Chat Core 0.2", 12, blue, 7)
+        sub(scrollBody, appVersionLabel(), 12, blue, 7)
         sub(scrollBody, "Developed by Шогирдои Малем", 12, dark, 5).typeface = Typeface.DEFAULT_BOLD
         compactButton(scrollBody, t("Выйти из аккаунта", "Баромадан аз ҳисоб"), red) {
             sip.logout()
@@ -1212,13 +2000,26 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         overlay.addView(panel, FrameLayout.LayoutParams(panelWidth, -1, Gravity.END))
         scrim.setOnClickListener { closeDrawer(overlay, panel) }
         rootContainer.addView(overlay, FrameLayout.LayoutParams(-1, -1))
+        activeDrawerOverlay = overlay
+        activeDrawerPanel = panel
         panel.post { panel.animate().translationX(0f).setDuration(220).start() }
     }
 
     private fun closeDrawer(overlay: View, panel: View) {
+        if (activeDrawerOverlay === overlay) {
+            activeDrawerOverlay = null
+            activeDrawerPanel = null
+        }
         panel.animate().translationX(panel.width.toFloat()).setDuration(180).withEndAction {
-            if (overlay.parent != null) rootContainer.removeView(overlay)
+            (overlay.parent as? ViewGroup)?.removeView(overlay)
         }.start()
+    }
+
+    private fun closeActiveDrawer(): Boolean {
+        val overlay = activeDrawerOverlay ?: return false
+        val panel = activeDrawerPanel ?: return false
+        closeDrawer(overlay, panel)
+        return true
     }
 
     private fun compactSection(parent: LinearLayout, text: String) {
@@ -1406,18 +2207,42 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
     }
 
     private fun showThemeDialog() {
-        val values = arrayOf(t("Светлая", "Равшан"), t("Тёмная", "Торик"))
+        val values = arrayOf(
+            t("Системная", "Системавӣ"),
+            t("Светлая", "Равшан"),
+            t("Тёмная", "Торик")
+        )
+        val selected = when (themeMode) {
+            "light" -> 1
+            "dark" -> 2
+            else -> 0
+        }
         AlertDialog.Builder(this)
             .setTitle(t("Оформление", "Намуди зоҳирӣ"))
-            .setSingleChoiceItems(values, if (isDarkTheme) 1 else 0) { dialog, which ->
-                preferences.edit().putString("theme", if (which == 1) "dark" else "light").apply()
+            .setSingleChoiceItems(values, selected) { dialog, which ->
+                val value = when (which) {
+                    1 -> "light"
+                    2 -> "dark"
+                    else -> "system"
+                }
+                preferences.edit().putString("theme", value).apply()
                 dialog.dismiss()
                 recreate()
             }
             .show()
     }
 
+    private fun themeModeLabel(): String = when (themeMode) {
+        "light" -> t("Светлая", "Равшан")
+        "dark" -> t("Тёмная", "Торик")
+        else -> t("Системная", "Системавӣ")
+    }
+
+    private fun appVersionLabel(): String =
+        "Tvoice ${BuildConfig.VERSION_NAME} • SIP Core 1.8 • Chat Core 0.4"
+
     private fun showIncomingCall(remote: String) {
+        callUiMinimized = false
         createShell(false)
         val body = screen(false).apply {
             gravity = Gravity.CENTER_HORIZONTAL
@@ -1438,7 +2263,13 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         }
         body.addView(avatar, LinearLayout.LayoutParams(dp(96), dp(96)).apply { topMargin = dp(72) })
         heading(body, remote, 34, dark, 24).gravity = Gravity.CENTER
-        sub(body, t("Входящий звонок", "Занги воридотӣ"), 17, muted, 10).gravity = Gravity.CENTER
+        sub(
+            body,
+            if (sip.isVideoCall) t("Входящий видеозвонок", "Занги видеоии воридотӣ") else t("Входящий звонок", "Занги воридотӣ"),
+            17,
+            muted,
+            10
+        ).gravity = Gravity.CENTER
         body.addView(Space(this), LinearLayout.LayoutParams(1, 0, 1f))
 
         val actions = LinearLayout(this).apply {
@@ -1446,7 +2277,7 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
             gravity = Gravity.CENTER
         }
         actions.addView(incomingAction(R.drawable.ic_call_end, red, t("Отклонить", "Рад кардан")) { sip.hangup() }, LinearLayout.LayoutParams(0, dp(126), 1f))
-        actions.addView(incomingAction(R.drawable.ic_call, green, t("Ответить", "Ҷавоб додан")) { sip.accept() }, LinearLayout.LayoutParams(0, dp(126), 1f))
+        actions.addView(incomingAction(R.drawable.ic_call, green, t("Ответить", "Ҷавоб додан")) { answerIncomingCall() }, LinearLayout.LayoutParams(0, dp(126), 1f))
         body.addView(actions, LinearLayout.LayoutParams(-1, dp(126)))
         notifyIncomingScreenVisible()
     }
@@ -1458,8 +2289,20 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         )
     }
 
+    private fun answerIncomingCall() {
+        startService(
+            Intent(this, TvoiceCallService::class.java)
+                .setAction(TvoiceCallService.ACTION_ANSWER)
+        )
+    }
+
     private fun showCall(remote: String, state: String) {
+        if (sip.isVideoCall) {
+            showVideoCall(remote, state)
+            return
+        }
         createShell(false)
+        showingCallScreen = true
         val screenHeight = resources.configuration.screenHeightDp
         val screenWidth = resources.configuration.screenWidthDp
         val veryCompact = screenHeight < 630
@@ -1474,16 +2317,43 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
             background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(callPageTop, callPageBottom))
             setPadding(dp(horizontalPadding), dp(verticalPadding), dp(horizontalPadding), dp(verticalPadding))
         }
-        val avatar = TextView(this).apply {
-            text = avatarSymbols("", remote)
-            textSize = if (veryCompact) 22f else 26f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            typeface = Typeface.DEFAULT_BOLD
-            background = rounded(blue, dp(primarySize / 2).toFloat())
+        val callHeader = FrameLayout(this).apply {
+            addView(TextView(this@MainActivity).apply {
+                text = "Tvoice"
+                textSize = 16f
+                setTextColor(blue)
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+            }, FrameLayout.LayoutParams(-1, -1))
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.ic_minimize)
+                setColorFilter(blue)
+                setPadding(dp(10), dp(10), dp(10), dp(10))
+                contentDescription = t("Свернуть звонок", "Пӯшидани равзанаи занг")
+                background = rounded(surface, dp(20).toFloat(), line, 1)
+                setOnClickListener { minimizeCall() }
+            }, FrameLayout.LayoutParams(dp(42), dp(42), Gravity.END or Gravity.CENTER_VERTICAL))
         }
-        body.addView(avatar, LinearLayout.LayoutParams(dp(primarySize), dp(primarySize)))
-        heading(body, remote, if (veryCompact) 30 else if (compact) 34 else 38, dark, if (compact) 14 else 20).apply {
+        body.addView(callHeader, LinearLayout.LayoutParams(-1, dp(44)))
+        if (sip.isVideoCall) {
+            body.addView(
+                videoCanvas(remote),
+                LinearLayout.LayoutParams(-1, dp(if (veryCompact) 190 else if (compact) 230 else 280)).apply {
+                    topMargin = dp(8)
+                }
+            )
+        } else {
+            val avatar = TextView(this).apply {
+                text = avatarSymbols("", remote)
+                textSize = if (veryCompact) 22f else 26f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                typeface = Typeface.DEFAULT_BOLD
+                background = rounded(blue, dp(primarySize / 2).toFloat())
+            }
+            body.addView(avatar, LinearLayout.LayoutParams(dp(primarySize), dp(primarySize)))
+        }
+        heading(body, remote, TvoiceUi.CALL_NUMBER_SP.toInt(), dark, if (compact) 14 else 20).apply {
             gravity = Gravity.CENTER
             textAlignment = View.TEXT_ALIGNMENT_CENTER
         }
@@ -1491,6 +2361,13 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
             gravity = Gravity.CENTER
             textAlignment = View.TEXT_ALIGNMENT_CENTER
         }
+        val duration = sub(body, "", if (veryCompact) 17 else 20, dark, 5).apply {
+            gravity = Gravity.CENTER
+            textAlignment = View.TEXT_ALIGNMENT_CENTER
+            typeface = Typeface.MONOSPACE
+            visibility = if (TvoiceRuntime.callConnectedAtMillis == null) View.GONE else View.VISIBLE
+        }
+        if (duration.visibility == View.VISIBLE) startCallTimer(duration)
         val spacer = Space(this); body.addView(spacer, LinearLayout.LayoutParams(1, 0, 1f))
         val keypad = callKeypad(compact).apply { visibility = View.GONE }
         body.addView(keypad, LinearLayout.LayoutParams(-1, dp(keypadHeight)))
@@ -1517,7 +2394,47 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         body.addView(firstRow, LinearLayout.LayoutParams(-1, dp(rowHeight)))
         val secondRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         secondRow.addView(toggleCallControl(R.drawable.ic_pause, R.drawable.ic_play, t("Удержание", "Нигоҳдорӣ"), compact) { sip.toggleHold() }, LinearLayout.LayoutParams(0, dp(rowHeight), 1f))
-        secondRow.addView(toggleCallControl(R.drawable.ic_group_add, R.drawable.ic_group_add, t("Конференция", "Конфронс"), compact) { showConferenceDialog(); true }, LinearLayout.LayoutParams(0, dp(rowHeight), 1f))
+        if (sip.isVideoCall) {
+            secondRow.addView(
+                toggleCallControl(
+                    R.drawable.ic_videocam,
+                    R.drawable.ic_videocam,
+                    t("Камера", "Камера"),
+                    compact,
+                    initialSelected = sip.isVideoCameraEnabled()
+                ) {
+                    if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 16)
+                        false
+                    } else sip.toggleVideoCamera().also { refreshVideoServiceType() }
+                },
+                LinearLayout.LayoutParams(0, dp(rowHeight), 1f)
+            )
+            secondRow.addView(
+                toggleCallControl(
+                    R.drawable.ic_switch_camera,
+                    R.drawable.ic_switch_camera,
+                    t("Повернуть", "Иваз"),
+                    compact
+                ) {
+                    val switched = sip.switchVideoCamera()
+                    if (!switched) toast(t("Вторая камера не найдена", "Камераи дуюм ёфт нашуд"))
+                    false
+                },
+                LinearLayout.LayoutParams(0, dp(rowHeight), 1f)
+            )
+        }
+        if (sip.supportsConference()) {
+            secondRow.addView(
+                toggleCallControl(
+                    R.drawable.ic_group_add,
+                    R.drawable.ic_group_add,
+                    t("Конференция", "Конфронс"),
+                    compact
+                ) { false },
+                LinearLayout.LayoutParams(0, dp(rowHeight), 1f)
+            )
+        }
         body.addView(secondRow, LinearLayout.LayoutParams(-1, dp(rowHeight)))
         val end = ImageView(this).apply {
             setImageResource(R.drawable.ic_call_end)
@@ -1533,6 +2450,326 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         })
     }
 
+    private fun showVideoCall(remote: String, state: String) {
+        createShell(false)
+        showingCallScreen = true
+        videoControlsVisible = true
+        val frame = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            isClickable = true
+        }
+        content.removeAllViews()
+        content.addView(frame, FrameLayout.LayoutParams(-1, -1))
+
+        val remoteView = SurfaceView(this).apply {
+            contentDescription = t("Видео собеседника $remote", "Видеои ҳамсуҳбат $remote")
+            // Portrait-first fallback. Negotiated CVO packets replace this value.
+            rotation = 90f
+        }
+        videoRemoteView = remoteView
+        frame.addView(remoteView, FrameLayout.LayoutParams(-1, -1))
+        remoteView.post { applyRemoteVideoRotation(90) }
+        remoteView.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) { videoRemoteHolder = holder; attachVideoSurfaces() }
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) { videoRemoteHolder = holder; attachVideoSurfaces() }
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                if (videoRemoteHolder === holder) videoRemoteHolder = null
+                attachVideoSurfaces()
+            }
+        })
+
+        val topOverlay = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.TOP
+            setPadding(dp(8), dp(8), dp(8), dp(24))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(Color.argb(205, 0, 0, 0), Color.argb(110, 0, 0, 0), Color.TRANSPARENT)
+            )
+        }
+        topOverlay.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_back)
+            setColorFilter(Color.WHITE)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            contentDescription = t("Свернуть звонок", "Пӯшидани равзанаи занг")
+            setOnClickListener { minimizeCall() }
+        }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        val callInfo = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(2), 0, 0)
+        }
+        sub(callInfo, t("Tvoice • защищённый видеозвонок", "Tvoice • занги видеоии ҳифзшуда"), 10, Color.argb(220, 255, 255, 255), 0).apply {
+            gravity = Gravity.CENTER
+        }
+        heading(callInfo, remote, 20, Color.WHITE, 4).apply {
+            gravity = Gravity.CENTER
+            typeface = TvoiceUi.semiBold()
+        }
+        val timer = sub(callInfo, state, 12, Color.WHITE, 3).apply { gravity = Gravity.CENTER }
+        startCallTimer(timer, state)
+        topOverlay.addView(callInfo, LinearLayout.LayoutParams(0, -2, 1f))
+        topOverlay.addView(Space(this), LinearLayout.LayoutParams(dp(48), dp(48)))
+        frame.addView(topOverlay, FrameLayout.LayoutParams(-1, dp(126), Gravity.TOP))
+
+        val localWidth = (resources.configuration.screenWidthDp * 0.27f).toInt().coerceIn(86, 124)
+        val localHeight = (localWidth * 4f / 3f).toInt()
+        val localView = SurfaceView(this).apply {
+            setZOrderMediaOverlay(true)
+            // Camera2 receives this Surface as a second recording target. Its buffer
+            // must match the encoder stream, independent of the small on-screen view.
+            holder.setFixedSize(1280, 720)
+            rotation = sip.videoCameraRotationDegrees().toFloat()
+            scaleX = if (sip.isFrontVideoCamera()) -1f else 1f
+            clipToOutline = true
+            background = rounded(Color.rgb(20, 27, 40), dp(14).toFloat(), Color.WHITE, 1)
+            contentDescription = t("Перетаскиваемый предпросмотр камеры", "Пешнамоиши камера")
+        }
+        videoLocalView = localView
+        frame.addView(localView, FrameLayout.LayoutParams(dp(localWidth), dp(localHeight), Gravity.END or Gravity.TOP).apply {
+            topMargin = dp(116)
+            rightMargin = dp(14)
+        })
+        localView.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) { videoLocalHolder = holder; attachVideoSurfaces() }
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) { videoLocalHolder = holder; attachVideoSurfaces() }
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                if (videoLocalHolder === holder) videoLocalHolder = null
+                attachVideoSurfaces()
+            }
+        })
+
+        var touchOffsetX = 0f
+        var touchOffsetY = 0f
+        localView.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    touchOffsetX = event.rawX - view.x
+                    touchOffsetY = event.rawY - view.y
+                    showVideoControls(topOverlay, null)
+                    true
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    val maxX = (frame.width - view.width).coerceAtLeast(0).toFloat()
+                    val maxY = (frame.height - view.height).coerceAtLeast(0).toFloat()
+                    view.x = (event.rawX - touchOffsetX).coerceIn(0f, maxX)
+                    view.y = (event.rawY - touchOffsetY).coerceIn(0f, maxY)
+                    true
+                }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    scheduleVideoControlsHide(topOverlay, null)
+                    true
+                }
+                else -> false
+            }
+        }
+
+        val bottomOverlay = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(36), dp(18), dp(18))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.BOTTOM_TOP,
+                intArrayOf(Color.argb(220, 0, 0, 0), Color.argb(120, 0, 0, 0), Color.TRANSPARENT)
+            )
+        }
+        bottomOverlay.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_call_end)
+            setColorFilter(Color.WHITE)
+            setPadding(dp(17), dp(17), dp(17), dp(17))
+            background = rounded(red, dp(29).toFloat())
+            elevation = dp(5).toFloat()
+            contentDescription = t("Завершить видеозвонок", "Анҷоми занги видеоӣ")
+            setOnClickListener { sip.hangup() }
+        }, LinearLayout.LayoutParams(dp(58), dp(58)).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            bottomMargin = dp(24)
+        })
+
+        val controlsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        controlsRow.addView(videoCircleAction(R.drawable.ic_switch_camera, R.drawable.ic_switch_camera, t("Переключить камеру", "Ивази камера"), false) {
+            val switched = sip.switchVideoCamera()
+            if (switched) {
+                localView.rotation = sip.videoCameraRotationDegrees().toFloat()
+                localView.scaleX = if (sip.isFrontVideoCamera()) -1f else 1f
+            } else toast(t("Вторая камера не найдена", "Камераи дуюм ёфт нашуд"))
+            false
+        }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        controlsRow.addView(videoCircleAction(R.drawable.ic_videocam_off, R.drawable.ic_videocam, t("Включить или выключить камеру", "Фаъол ё хомӯш кардани камера"), sip.isVideoCameraEnabled()) {
+            sip.toggleVideoCamera().also { refreshVideoServiceType() }
+        }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        controlsRow.addView(videoCircleAction(R.drawable.ic_speaker, R.drawable.ic_speaker, t("Динамик", "Баландгӯяк"), sip.isSpeakerEnabled()) {
+            sip.toggleSpeaker()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        controlsRow.addView(videoCircleAction(R.drawable.ic_mic, R.drawable.ic_mic_off, t("Микрофон", "Микрофон"), sip.isMuted()) {
+            sip.toggleMute()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        bottomOverlay.addView(controlsRow, LinearLayout.LayoutParams(-1, dp(52)))
+        frame.addView(bottomOverlay, FrameLayout.LayoutParams(-1, dp(212), Gravity.BOTTOM))
+
+        frame.setOnClickListener {
+            if (videoControlsVisible) scheduleVideoControlsHide(topOverlay, bottomOverlay)
+            else showVideoControls(topOverlay, bottomOverlay)
+        }
+        showVideoControls(topOverlay, bottomOverlay)
+    }
+
+    private fun videoCircleAction(
+        icon: Int,
+        activeIcon: Int,
+        label: String,
+        initialSelected: Boolean,
+        action: () -> Boolean
+    ): FrameLayout = FrameLayout(this).apply {
+        var selectedState = initialSelected
+        val image = ImageView(this@MainActivity).apply {
+            contentDescription = label
+            fun render() {
+                setImageResource(if (selectedState) activeIcon else icon)
+                setColorFilter(Color.WHITE)
+                background = rounded(
+                    if (selectedState) Color.argb(190, 10, 132, 255) else Color.argb(90, 255, 255, 255),
+                    dp(24).toFloat(),
+                    Color.argb(80, 255, 255, 255),
+                    1
+                )
+            }
+            setPadding(dp(13), dp(13), dp(13), dp(13))
+            render()
+            setOnClickListener {
+                selectedState = action()
+                render()
+                videoControlsHideTask?.let { task ->
+                    uiHandler.removeCallbacks(task)
+                    uiHandler.postDelayed(task, 2_800L)
+                }
+            }
+        }
+        addView(image, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER))
+    }
+
+    private fun showVideoControls(top: View?, bottom: View?) {
+        videoControlsHideTask?.let(uiHandler::removeCallbacks)
+        listOfNotNull(top, bottom).forEach { view ->
+            view.visibility = View.VISIBLE
+            view.animate().alpha(1f).setDuration(150).start()
+        }
+        videoControlsVisible = true
+        scheduleVideoControlsHide(top, bottom)
+    }
+
+    private fun scheduleVideoControlsHide(top: View?, bottom: View?) {
+        videoControlsHideTask?.let(uiHandler::removeCallbacks)
+        val task = Runnable {
+            listOfNotNull(top, bottom).forEach { view ->
+                view.animate().alpha(0f).setDuration(180).withEndAction { view.visibility = View.INVISIBLE }.start()
+            }
+            videoControlsVisible = false
+        }
+        videoControlsHideTask = task
+        uiHandler.postDelayed(task, 2_800L)
+    }
+
+    private fun videoCanvas(remote: String): FrameLayout {
+        val frame = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            clipToOutline = true
+            background = rounded(Color.BLACK, dp(18).toFloat())
+        }
+        val remoteView = SurfaceView(this).apply {
+            contentDescription = t("Видео собеседника $remote", "Видеои ҳамсуҳбат $remote")
+            holder.setFixedSize(640, 480)
+            rotation = 90f
+        }
+        frame.addView(remoteView, FrameLayout.LayoutParams(-1, -1))
+        remoteView.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                videoRemoteHolder = holder
+                attachVideoSurfaces()
+            }
+
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                videoRemoteHolder = holder
+                attachVideoSurfaces()
+            }
+
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                if (videoRemoteHolder === holder) videoRemoteHolder = null
+                attachVideoSurfaces()
+            }
+        })
+        val localView = SurfaceView(this).apply {
+            setZOrderMediaOverlay(true)
+            contentDescription = t("Предпросмотр камеры", "Пешнамоиши камера")
+            holder.setFixedSize(1280, 720)
+        }
+        frame.addView(
+            localView,
+            FrameLayout.LayoutParams(dp(84), dp(112), Gravity.END or Gravity.BOTTOM).apply {
+                rightMargin = dp(10)
+                bottomMargin = dp(10)
+            }
+        )
+        localView.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                videoLocalHolder = holder
+                attachVideoSurfaces()
+            }
+
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                videoLocalHolder = holder
+                attachVideoSurfaces()
+            }
+
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                if (videoLocalHolder === holder) videoLocalHolder = null
+                attachVideoSurfaces()
+            }
+        })
+        return frame
+    }
+
+    private fun attachVideoSurfaces() {
+        if (!sip.isVideoCall) return
+        sip.setVideoSurfaces(
+            videoLocalHolder?.surface?.takeIf { it.isValid },
+            videoRemoteHolder?.surface?.takeIf { it.isValid }
+        )
+    }
+
+    private fun applyRemoteVideoRotation(degrees: Int) {
+        val view = videoRemoteView ?: return
+        val normalized = ((degrees % 360) + 360) % 360
+        view.post {
+            view.rotation = normalized.toFloat()
+            val quarterTurn = normalized == 90 || normalized == 270
+            val scale = if (quarterTurn && view.width > 0 && view.height > 0) {
+                maxOf(view.width.toFloat() / view.height, view.height.toFloat() / view.width)
+            } else 1f
+            view.scaleX = scale
+            view.scaleY = scale
+        }
+    }
+
+    private fun applyLocalVideoRotation(degrees: Int) {
+        val view = videoLocalView ?: return
+        val normalized = ((degrees % 360) + 360) % 360
+        view.post {
+            view.rotation = normalized.toFloat()
+            view.scaleX = if (sip.isFrontVideoCamera()) -1f else 1f
+        }
+    }
+
+    private fun refreshVideoServiceType() {
+        startService(
+            Intent(this, TvoiceCallService::class.java)
+                .setAction(TvoiceCallService.ACTION_VIDEO_STATE_CHANGED)
+        )
+    }
+
     override fun onRegistration(state: RegistrationState, message: String) = runOnUiThread {
         when (state) {
             RegistrationState.Ok -> {
@@ -1541,15 +2778,26 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
                     accountNumbers.add(pendingAddedNumber); ownNumber = pendingAddedNumber; addingAccount = false; showAccount()
                 } else {
                     if (ownNumber.isNotEmpty() && ownNumber !in accountNumbers) accountNumbers.add(ownNumber)
-                    intent.getStringExtra(EXTRA_OPEN_CHAT)?.let(::showConversation) ?: showCalls()
+                    if (!isOngoingCall() && TvoiceRuntime.callState != CallState.IncomingReceived) {
+                        intent.getStringExtra(EXTRA_OPEN_CHAT)?.let(::showConversation) ?: showCalls()
+                    }
                 }
             }
             RegistrationState.Failed -> if (ownNumber.isNotEmpty()) {
                 val fatal = message.contains("логин", true) ||
                     message.contains("пароль", true) ||
-                    message.startsWith("SIP 403")
+                    message.startsWith("SIP 401") ||
+                    message.startsWith("SIP 403") ||
+                    message.startsWith("SIP 404")
                 toast(t("Нет связи: $message", "Пайваст нест: $message"))
-                if (fatal) showLogin() else showConnecting()
+                if (fatal && addingAccount) {
+                    addingAccount = false
+                    pendingAddedNumber = ""
+                    ownNumber = TvoiceRuntime.activeUsername
+                    accountNumbers.clear()
+                    accountNumbers.addAll(TvoiceRuntime.accountUsernames())
+                    showAccount()
+                } else if (fatal) showLogin() else showConnecting()
             }
             RegistrationState.Cleared -> if (ownNumber.isNotEmpty()) showLogin()
             else -> Unit
@@ -1560,36 +2808,71 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         if (state == CallState.IncomingReceived) {
             beginHistory(remote, "Входящий")
         }
-        if ((state == CallState.Connected || state == CallState.StreamsRunning) && connectedAtMillis == null) {
-            connectedAtMillis = System.currentTimeMillis()
+        if (state == CallState.Connected || state == CallState.StreamsRunning) {
+            callHistoryTracker.markConnected(System.currentTimeMillis())
         }
         if (state == CallState.End || state == CallState.Error || state == CallState.Released) {
             finishHistory()
         }
         if (!TvoiceRuntime.isMainUiVisible) return@runOnUiThread
+        if (state == CallState.StreamsRunning && message.startsWith("Видео:")) {
+            val remoteRotation = message.substringAfter("Видео:rotation=", "").toIntOrNull()
+            val localRotation = message.substringAfter("Видео:local-rotation=", "").toIntOrNull()
+            when {
+                remoteRotation != null -> applyRemoteVideoRotation(remoteRotation)
+                localRotation != null -> applyLocalVideoRotation(localRotation)
+                else -> toast(message)
+            }
+            return@runOnUiThread
+        }
         when (state) {
-            CallState.IncomingReceived -> showIncomingCall(remote)
-            CallState.OutgoingInit, CallState.OutgoingProgress, CallState.OutgoingRinging -> showCall(remote, t("Вызов…", "Занг…"))
-            CallState.Connected, CallState.StreamsRunning -> showCall(remote, t("Соединено", "Пайваст"))
-            CallState.Paused -> showCall(remote, t("Удержание", "Нигоҳдорӣ"))
+            CallState.IncomingReceived -> {
+                callUiMinimized = false
+                showIncomingCall(remote)
+            }
+            CallState.OutgoingInit -> {
+                if (!callUiMinimized) showCall(remote, t("Вызов…", "Занг…"))
+            }
+            CallState.OutgoingProgress, CallState.OutgoingRinging -> {
+                // INVITE progress events arrive within milliseconds. Rebuilding the
+                // complete hierarchy for each one made the call window visibly jump.
+                if (!callUiMinimized && !showingCallScreen) showCall(remote, t("Вызов…", "Занг…"))
+            }
+            CallState.Connected -> {
+                if (!callUiMinimized) showCall(remote, t("Соединено", "Пайваст"))
+            }
+            CallState.StreamsRunning -> {
+                if (!callUiMinimized && !showingCallScreen) showCall(remote, t("Соединено", "Пайваст"))
+            }
+            CallState.Paused -> {
+                if (!callUiMinimized) showCall(remote, t("Удержание", "Нигоҳдорӣ"))
+            }
             CallState.Error -> {
                 toast("Ошибка звонка: $message")
-                showCalls()
+                val wasMinimized = callUiMinimized
+                callUiMinimized = false
+                if (showingCallScreen || !wasMinimized) showCalls() else dismissActiveCallBanner()
             }
             CallState.End -> {
                 if (message.isNotBlank()) toast(message)
-                showCalls()
+                val wasMinimized = callUiMinimized
+                callUiMinimized = false
+                if (showingCallScreen || !wasMinimized) showCalls() else dismissActiveCallBanner()
             }
-            CallState.Released -> Unit
+            CallState.Released -> {
+                callUiMinimized = false
+                dismissActiveCallBanner()
+            }
             else -> Unit
         }
     }
 
     override fun onMessage(state: MessageState, remote: String, text: String, message: String) = runOnUiThread {
-        if (currentChatPeer == remote && TvoiceRuntime.isMainUiVisible) {
-            showConversation(remote)
+        val peer = SipIdentity.normalize(remote)
+        if (currentChatPeer == peer && TvoiceRuntime.isMainUiVisible) {
+            refreshOpenConversation()
         } else if (state == MessageState.Received && TvoiceRuntime.isMainUiVisible) {
-            toast(t("Новое сообщение от $remote", "Паёми нав аз $remote"))
+            toast(t("Новое сообщение от $peer", "Паёми нав аз $peer"))
             if (homePage == HomePage.Chat) showChats()
         } else if (state == MessageState.Error && TvoiceRuntime.isMainUiVisible) {
             toast(t("Не удалось отправить: $message", "Ирсол нашуд: $message"))
@@ -1597,15 +2880,20 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
     }
 
     override fun onChatState(connected: Boolean, message: String) = runOnUiThread {
-        if (!TvoiceRuntime.isMainUiVisible || homePage != HomePage.Chat) return@runOnUiThread
-        currentChatPeer?.let { showConversation(it, refresh = false) } ?: showChats(refresh = false)
+        if (!TvoiceRuntime.isMainUiVisible) return@runOnUiThread
+        if (!connected && message.contains("не синхронизирован", true)) toast(message)
+        when (homePage) {
+            HomePage.Chat -> if (currentChatPeer == null) showChats(refresh = false)
+            HomePage.Profile -> showProfile()
+            else -> Unit
+        }
     }
 
     override fun onChatSync(peer: String?) = runOnUiThread {
         if (!TvoiceRuntime.isMainUiVisible || homePage != HomePage.Chat) return@runOnUiThread
         val openedPeer = currentChatPeer
         if (openedPeer != null && (peer == null || peer == openedPeer)) {
-            showConversation(openedPeer, refresh = false)
+            refreshOpenConversation()
         } else if (openedPeer == null) {
             showChats(refresh = false)
         }
@@ -1618,13 +2906,33 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         }
     }
 
+    override fun onIncomingVideoCall(invite: ChatClient.VideoCallInvite) = runOnUiThread {
+        if (!TvoiceRuntime.isMainUiVisible) return@runOnUiThread
+        if (TvoiceRuntime.callState !in setOf(CallState.Idle, CallState.End, CallState.Released)) {
+            ChatClient.rejectVideoCall(invite.callId)
+            return@runOnUiThread
+        }
+        startActivity(
+            VideoCallActivity.incomingIntent(this, invite)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        )
+    }
+
     private fun navItem(icon: Int, label: String, selected: Boolean, action: () -> Unit) {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
-            if (selected) background = rounded(if (isDarkTheme) Color.rgb(30, 58, 110) else Color.rgb(235, 241, 255), dp(14).toFloat())
-            val i = ImageView(this@MainActivity).apply { setImageResource(icon); setColorFilter(if (selected) blue else muted); setPadding(dp(4), dp(4), dp(4), dp(4)) }
-            val l = TextView(this@MainActivity).apply { text = label; textSize = 11f; setTextColor(if (selected) blue else muted); gravity = Gravity.CENTER; typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT }
-            addView(i, LinearLayout.LayoutParams(dp(30), dp(30))); addView(l, LinearLayout.LayoutParams(-1, dp(23))); setOnClickListener { action() }
+            isClickable = true
+            isFocusable = true
+            foreground = TvoiceUi.ripple(this@MainActivity, Color.TRANSPARENT, 12)
+            val i = ImageView(this@MainActivity).apply { setImageResource(icon); setColorFilter(if (selected) blue else muted); setPadding(dp(2), dp(2), dp(2), dp(2)) }
+            val l = TextView(this@MainActivity).apply {
+                text = label
+                TvoiceUi.style(this, TvoiceUi.CAPTION_SP, if (selected) blue else muted, if (selected) TvoiceUi.medium() else TvoiceUi.regular())
+                gravity = Gravity.CENTER
+            }
+            addView(i, LinearLayout.LayoutParams(dp(24), dp(24)))
+            addView(l, LinearLayout.LayoutParams(-1, dp(20)).apply { topMargin = dp(2) })
+            setOnClickListener { action() }
         }
         bottomBar.addView(box, LinearLayout.LayoutParams(0, -1, 1f))
     }
@@ -1680,16 +2988,6 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
             }
         }
         dialog.show()
-    }
-
-    private fun showConferenceDialog() {
-        val field = EditText(this).apply { hint = t("SIP-номер участника", "Рақами SIP-и иштирокчӣ"); inputType = InputType.TYPE_CLASS_PHONE; setTextColor(dark); setHintTextColor(muted); setPadding(dp(18), 0, dp(18), 0); background = rounded(surface, dp(13).toFloat(), line, 2) }
-        val wrap = FrameLayout(this).apply { setPadding(dp(20), dp(12), dp(20), 0); addView(field, FrameLayout.LayoutParams(-1, dp(58))) }
-        AlertDialog.Builder(this).setTitle(t("Добавить в конференцию", "Илова ба конфронс")).setView(wrap).setNegativeButton(t("Отмена", "Бекор кардан"), null)
-            .setPositiveButton(t("Позвонить", "Занг задан")) { _, _ ->
-                val number = field.text.toString().trim()
-                if (number.isBlank()) toast("Введите номер") else runCatching { sip.addToConference(number) }.onFailure { toast(it.message ?: "Ошибка конференции") }
-            }.show()
     }
 
     private fun callKeypad(compact: Boolean): GridLayout = GridLayout(this).apply {
@@ -1757,13 +3055,16 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
     }
 
     private fun modernEdit(parent: LinearLayout, label: String, hint: String, password: Boolean): EditText {
-        sub(parent, label, 13, dark, if (parent.childCount == 0) 0 else 15)
+        sub(parent, label, TvoiceUi.SECONDARY_SP.toInt(), dark, if (parent.childCount == 0) 0 else 14).typeface = TvoiceUi.medium()
         val field = EditText(this).apply {
-            this.hint = hint; textSize = 17f; setTextColor(dark); setHintTextColor(Color.rgb(148, 163, 184))
+            this.hint = hint
+            TvoiceUi.style(this, TvoiceUi.BODY_SP, dark)
+            setHintTextColor(muted)
             inputType = if (password) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD else InputType.TYPE_CLASS_PHONE
-            setPadding(dp(16), 0, dp(16), 0); background = rounded(surface, dp(13).toFloat(), line, 2)
+            setPadding(dp(16), 0, dp(16), 0)
+            background = rounded(surface, dp(12).toFloat(), line, 1)
         }
-        parent.addView(field, LinearLayout.LayoutParams(-1, dp(58)).apply { topMargin = dp(7) })
+        parent.addView(field, LinearLayout.LayoutParams(-1, dp(TvoiceUi.FIELD_DP)).apply { topMargin = dp(7) })
         return field
     }
 
@@ -1800,10 +3101,13 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
 
     private fun primaryButton(parent: LinearLayout, text: String, color: Int, top: Int, action: (View) -> Unit): Button {
         val button = Button(this).apply {
-            this.text = text; textSize = 17f; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
-            background = rounded(color, dp(15).toFloat()); stateListAnimator = null; setOnClickListener(action)
+            this.text = text
+            TvoiceUi.style(this, TvoiceUi.BUTTON_SP, Color.WHITE, TvoiceUi.semiBold())
+            background = rounded(color, dp(12).toFloat())
+            stateListAnimator = null
+            setOnClickListener(action)
         }
-        parent.addView(button, LinearLayout.LayoutParams(-1, dp(58)).apply { topMargin = dp(top) })
+        parent.addView(button, LinearLayout.LayoutParams(-1, dp(TvoiceUi.FIELD_DP)).apply { topMargin = dp(top) })
         return button
     }
 
@@ -1832,13 +3136,59 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
         addView(l, LinearLayout.LayoutParams(-1, dp(32)))
     }
 
+    private fun pageTitle(parent: LinearLayout, title: String): TextView = heading(
+        parent,
+        title,
+        TvoiceUi.PAGE_TITLE_SP.toInt(),
+        dark,
+        2
+    ).apply { typeface = TvoiceUi.bold() }
+
+    private fun sectionLabel(parent: LinearLayout, title: String): TextView = sub(
+        parent,
+        title,
+        TvoiceUi.SECONDARY_SP.toInt(),
+        muted,
+        14
+    ).apply {
+        typeface = TvoiceUi.medium()
+        letterSpacing = 0.02f
+    }
+
+    private fun searchField(parent: LinearLayout, hint: String, initial: String = "", onChanged: (String) -> Unit): EditText {
+        val icon = ContextCompat.getDrawable(this, R.drawable.ic_search)?.mutate()?.apply { setTint(muted) }
+        val field = EditText(this).apply {
+            this.hint = hint
+            setText(initial)
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT
+            TvoiceUi.style(this, TvoiceUi.BODY_SP, dark)
+            setHintTextColor(muted)
+            setPadding(dp(12), 0, dp(12), 0)
+            setCompoundDrawablesWithIntrinsicBounds(icon, null, null, null)
+            compoundDrawablePadding = dp(8)
+            background = rounded(TvoiceUi.color(this@MainActivity, R.color.tvoice_search), dp(10).toFloat())
+            doAfterTextChanged { onChanged(it?.toString().orEmpty()) }
+        }
+        parent.addView(field, LinearLayout.LayoutParams(-1, dp(TvoiceUi.SEARCH_DP)).apply { topMargin = dp(10) })
+        return field
+    }
+
     private fun heading(parent: LinearLayout, text: String, size: Int, color: Int, top: Int): TextView {
-        val v = TextView(this).apply { this.text = text; textSize = size.toFloat(); setTextColor(color); typeface = Typeface.DEFAULT_BOLD; gravity = if (parent.gravity == Gravity.CENTER_HORIZONTAL || parent.gravity == Gravity.CENTER) Gravity.CENTER else Gravity.START }
+        val v = TextView(this).apply {
+            this.text = text
+            TvoiceUi.style(this, size.toFloat(), color, TvoiceUi.semiBold())
+            gravity = if (parent.gravity == Gravity.CENTER_HORIZONTAL || parent.gravity == Gravity.CENTER) Gravity.CENTER else Gravity.START
+        }
         parent.addView(v, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(top) }); return v
     }
 
     private fun sub(parent: LinearLayout, text: String, size: Int, color: Int, top: Int): TextView {
-        val v = TextView(this).apply { this.text = text; textSize = size.toFloat(); setTextColor(color); gravity = if (parent.gravity == Gravity.CENTER_HORIZONTAL || parent.gravity == Gravity.CENTER) Gravity.CENTER else Gravity.START }
+        val v = TextView(this).apply {
+            this.text = text
+            TvoiceUi.style(this, size.toFloat(), color)
+            gravity = if (parent.gravity == Gravity.CENTER_HORIZONTAL || parent.gravity == Gravity.CENTER) Gravity.CENTER else Gravity.START
+        }
         parent.addView(v, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(top) }); return v
     }
 
@@ -1857,23 +3207,16 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
     }
 
     private fun t(russian: String, tajik: String): String = if (isTajik) tajik else russian
-    private fun formatDuration(seconds: Long): String {
-        val hours = seconds / 3600
-        val minutes = (seconds % 3600) / 60
-        val secs = seconds % 60
-        return if (hours > 0) "%d:%02d:%02d".format(Locale.getDefault(), hours, minutes, secs)
-        else "%02d:%02d".format(Locale.getDefault(), minutes, secs)
-    }
+    private fun formatDuration(seconds: Long): String = CallDurationFormatter.format(seconds)
     private fun formatTime(timestamp: Long) = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
     private fun now() = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
-    @Suppress("DiscouragedApi")
-    private fun statusBarHeight(): Int {
-        val resourceId = resources.getIdentifier("status_bar_height", "dimen", "android")
-        return if (resourceId > 0) resources.getDimensionPixelSize(resourceId) else dp(24)
-    }
+    private fun statusBarHeight(): Int = dp(24)
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()
     override fun onDestroy() {
+        stopCallTimer()
+        videoControlsHideTask?.let(uiHandler::removeCallbacks)
+        if (sip.isVideoCall) sip.setVideoSurfaces(null, null)
         TvoiceRuntime.removeObserver(this)
         ChatClient.removeObserver(this)
         super.onDestroy()
@@ -1882,5 +3225,12 @@ class MainActivity : AppCompatActivity(), SipManager.Observer, ChatClient.Observ
     companion object {
         const val EXTRA_OPEN_CHAT = "tj.tvoice.app.extra.OPEN_CHAT"
         private const val REQUEST_CHAT_ATTACHMENT = 21
+        private const val STATE_HOME_PAGE = "home_page"
+        private const val STATE_CHAT_PEER = "chat_peer"
+        private const val STATE_CALL_MINIMIZED = "call_minimized"
+        private const val PREF_FAVORITE_CALLS = "favorite_call_numbers"
+        private const val EXTRA_UI_PREVIEW = "ui_preview"
+        private const val EXTRA_UI_PREVIEW_DARK = "ui_preview_dark"
+        private const val EXTRA_UI_PREVIEW_LANGUAGE = "ui_preview_language"
     }
 }

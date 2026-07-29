@@ -1,67 +1,83 @@
 # Tvoice
 
-Tvoice is a branded Android SIP softphone for the Tvoice service.
+Tvoice is a branded Android SIP softphone and chat client for the Tvoice service.
 
-## Tvoice SIP Core and Chat Core
+The native iOS port is maintained separately in [`ios/`](ios/README.md). Android
+continues to use the root Gradle project and `app/`; iOS uses SwiftUI/XcodeGen and
+does not change Android build outputs.
 
-Version 0.9 uses the project's own Kotlin implementation and keeps it active in an Android foreground service:
+## Capabilities
 
-- SIP/2.0 registration over UDP;
-- HTTP Digest/MD5 SIP authentication (`401` and `407`);
-- outgoing and incoming calls (`INVITE`, `ACK`, `CANCEL`, `BYE`);
-- SDP offer/answer;
-- RTP audio with G.711 A-law and mu-law;
-- RFC 2833 telephone events with SIP INFO fallback;
-- microphone mute and Android communication audio routing;
-- call hold/resume using re-INVITE.
-- encrypted account restoration using Android Keystore;
-- Android CallStyle notifications and a lock-screen incoming-call activity;
-- UDP NAT Contact correction from SIP `received`/`rport` and 45-second registration refreshes.
-- correct authenticated INVITE retry without reusing a challenge `To-tag`;
-- separate light incoming-call UI before the active conversation controls appear.
-- automatic SIP socket recreation after Wi-Fi/mobile network changes;
-- registration recovery with bounded retry delays after temporary network failures.
-- dedicated Tvoice Chat connection over HTTPS and secure WebSocket (WSS);
-- automatic Chat login with the active SIP subscriber number and password;
-- live message delivery, emoji shortcuts, photos/files up to 20 MB, background
-  notifications and a local offline cache;
-- contact search and creation when starting a new conversation;
-- two-second adaptive TOJIKTELECOM/Tvoice welcome screen with safe system-bar spacing;
-- three-section navigation for contacts, calls and chat;
-- compact right-side account panel, Russian/Tajik UI and light/dark themes.
+- SIP/2.0 registration over UDP with HTTP Digest/MD5 authentication;
+- outgoing and incoming calls, SDP, G.711 A-law/mu-law RTP audio;
+- one-to-one LiveKit/WebRTC video calls with Opus, VP8/H.264, adaptive quality and short-lived tokens;
+- RFC 2833 DTMF with SIP INFO fallback, mute, speaker and hold/resume;
+- Android foreground calling service, CallStyle notifications and lock-screen incoming-call UI;
+- connected-call duration, minimizable in-app call screen and an active-call banner while using chat;
+- compact four-tab messenger UI (contacts, calls, chats and account) with safe system/IME insets;
+- NAT Contact correction, registration refresh, bounded recovery and socket recreation after a
+  Wi-Fi/mobile network change;
+- encrypted persistent multi-account credentials with one active SIP registration at a time;
+- a separate HTTPS/WSS Tvoice Chat client, encrypted offline cache and photos/files up to 20 MB;
+- server-backed Tvoice contact directory, canonical SIP addressing, token refresh and retryable
+  delivery errors;
+- device contacts, call history, Russian/Tajik UI, light/dark themes and account switching.
 
-The core is intentionally scoped to the Tvoice server configuration. It does not contain source or binaries from Linphone, PJSIP, Zoiper or MicroSIP.
+Conference controls remain hidden because the configured PBX has no verified conference capability.
+
+The core is scoped to the Tvoice server profile. It contains no source or binaries from Linphone,
+PJSIP, Zoiper or MicroSIP.
 
 ## Test configuration
 
 - SIP server: `185.177.2.115`
-- Port: `5060`
-- Transport: `UDP`
+- SIP port/transport: `5060/UDP`
 - Login: subscriber number and password entered on the device
-- Preferred codecs: `PCMA/8000`, then `PCMU/8000`
+- Preferred codecs: `PCMA/8000`, then `PCMU/8000`; video: `H264/90000`, packetization mode 1
 - Chat API: `https://chat.185-177-2-115.sslip.io`
+- Video signalling: `wss://video.185-177-2-115.sslip.io`; media: UDP 443, TCP 8091 fallback
 
-Passwords are never stored in this repository. The active account password is encrypted with an
-AES/GCM key held by Android Keystore; only the encrypted payload is kept in private app preferences
-so the foreground calling service can recover after Android restarts its process. The Chat access
-token and plaintext password are kept only in process memory. The Chat server stores a one-way
-password hash rather than the subscriber password.
+Passwords are never stored in this repository. Saved SIP accounts, call history and the limited
+local chat cache are AES/GCM encrypted with separate non-exportable Android Keystore keys. Chat
+access tokens and plaintext passwords are kept only in process memory.
 
-## Build
+## Architecture
 
-Every push to `main` builds a debug APK in GitHub Actions. Protocol unit tests are located in `app/src/test`. Open the latest **Build Android APK** run and download the `Tvoice-debug-apk` artifact.
+The UI talks to a `TvoiceController` boundary. `TvoiceRuntime` owns process-lifetime orchestration,
+`SipManager` owns account switching, and `TvoiceSipCore`/`RtpAudioSession` own protocol sockets.
+Account, call-history, contacts and chat persistence are separate stores/repositories. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for dependency rules and data flows.
+
+## Build and verification
+
+Use the checked-in, checksum-pinned Gradle wrapper:
+
+```bash
+./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+```
+
+Pull requests run unit tests, Android lint and a debug build. Pushes to `main` additionally build an
+R8-optimized, resource-shrunk release APK signed with repository secrets. The workflow publishes
+quality reports plus separate debug and release artifacts. Release signing needs
+`TVOICE_KEYSTORE_BASE64` and `TVOICE_KEYSTORE_PASSWORD` GitHub secrets.
 
 ## Security
 
-The current server profile uses SIP/UDP and unencrypted RTP to remain compatible with the existing PBX. TLS and SRTP should be enabled together with matching PBX configuration before carrying sensitive calls over untrusted networks.
+The PBX profile uses SIP/UDP and unencrypted RTP. Incoming SIP datagrams are restricted to the
+configured server address; RTP is restricted to the negotiated media address and pinned SSRC.
+These checks reduce spoofing but do not provide confidentiality. SIP/TLS and SRTP must be enabled
+together with matching PBX configuration before carrying sensitive calls over untrusted networks.
+See [`SECURITY.md`](SECURITY.md).
 
-Chat does not use SIP `MESSAGE`. It uses the separate Tvoice Chat service over HTTPS/WSS. Every
-subscriber must first be provisioned on that service with the same number and password used by the
-app. PostgreSQL keeps the server-side message history, while attachments are held in a persistent
-protected server volume; Android keeps a limited local cache.
+Chat uses the separate HTTPS/WSS Tvoice Chat service, not SIP `MESSAGE`. Its Android cache is
+AES-GCM encrypted. Attachment downloads are bounded to 20 MB even if the server omits or falsifies
+`Content-Length`.
+
+The verified chat and video server requirements are documented in [`CHAT_API.md`](CHAT_API.md),
+[`FREEPBX_CHAT_SYNC.md`](FREEPBX_CHAT_SYNC.md) and [`VIDEO_CALLS.md`](VIDEO_CALLS.md).
 
 ## Ownership and third-party components
 
-The Tvoice application, Tvoice SIP Core and Tvoice Chat integration are project code. AndroidX,
-Material Components, Material Icons, OkHttp and Okio remain subject to their respective licenses;
-see `THIRD_PARTY_NOTICES.md`.
+The Tvoice application, SIP core and chat integration are project code. AndroidX, Material
+Components, Material Icons, OkHttp and Okio remain subject to their respective licenses; see
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

@@ -1,12 +1,20 @@
 package tj.tvoice.app
 
 import android.content.Context
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.net.ConnectivityManager
+import android.os.Build
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.SocketException
 import java.net.SocketTimeoutException
+import android.view.Surface
+import java.util.Collections
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -35,7 +43,9 @@ internal class TvoiceSipCore(
         var remoteTarget: String,
         var routeSet: List<String>,
         val rtp: RtpAudioSession,
+        var video: RtpVideoSession?,
         var remoteMedia: RemoteMedia?,
+        var remoteVideo: RemoteVideoMedia?,
         var incomingInvite: SipMessage? = null,
         var connected: Boolean = false,
         var accepted: Boolean = false,
@@ -63,6 +73,7 @@ internal class TvoiceSipCore(
     private enum class Direction { OUTGOING, INCOMING }
 
     private val appContext = context.applicationContext
+    private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val server = InetSocketAddress(InetAddress.getByName(SipConfig.DOMAIN), SipConfig.PORT)
     private val sipSocket = DatagramSocket(0).apply { soTimeout = 750 }
     private val running = AtomicBoolean(true)
@@ -123,6 +134,7 @@ internal class TvoiceSipCore(
 
     fun unregister() {
         worker.execute {
+            if (dialog != null) finishCall(CallState.End, "Выход из аккаунта")
             keepAlive?.cancel(false)
             registrationRetry?.cancel(false)
             if (registered && username.isNotEmpty()) runCatching { sendRegister(expires = 0) }
@@ -131,7 +143,11 @@ internal class TvoiceSipCore(
         }
     }
 
-    fun call(number: String) {
+    fun call(number: String) = startCall(number, withVideo = false)
+
+    fun videoCall(number: String) = startCall(number, withVideo = true)
+
+    private fun startCall(number: String, withVideo: Boolean) {
         require(number.isNotBlank()) { "Введите номер" }
         worker.execute {
             if (!registered) {
@@ -142,7 +158,9 @@ internal class TvoiceSipCore(
                 listener.onCall(CallState.Error, number, "Другой звонок уже активен")
                 return@execute
             }
+            if (withVideo) speaker = shouldUseSpeakerForVideo()
             val session = RtpAudioSession(appContext)
+            val videoSession = if (withVideo) createVideoSession() else null
             val remoteUri = "sip:${number.trim()}@${SipConfig.DOMAIN}"
             val call = Dialog(
                 direction = Direction.OUTGOING,
@@ -157,7 +175,9 @@ internal class TvoiceSipCore(
                 remoteTarget = remoteUri,
                 routeSet = emptyList(),
                 rtp = session,
-                remoteMedia = null
+                video = videoSession,
+                remoteMedia = null,
+                remoteVideo = null
             )
             dialog = call
             listener.onCall(CallState.OutgoingInit, call.remoteUser, "Создание вызова")
@@ -178,7 +198,10 @@ internal class TvoiceSipCore(
             if (call.direction != Direction.INCOMING || call.accepted) return@execute
             val request = call.incomingInvite ?: return@execute
             val selected = call.remoteMedia?.codec ?: AudioCodec.PCMA
-            val body = localSdp(call.rtp, selected, call.held)
+            // A newly accepted call must never advertise hold. In particular,
+            // Asterisk treats either a=sendonly or c=0.0.0.0 as remote hold and
+            // immediately injects MusicOnHold into the connected bridge.
+            val body = localSdp(call, selected, false)
             sendResponse(request, 200, "OK", call.peer, call.localTag, body)
             call.accepted = true
             listener.onCall(CallState.Connected, call.remoteUser, "Ожидание подтверждения")
@@ -220,6 +243,25 @@ internal class TvoiceSipCore(
     fun isMuted(): Boolean = muted
 
     fun isSpeakerEnabled(): Boolean = speaker
+
+    fun isVideoCall(): Boolean = dialog?.video != null
+
+    fun isVideoCameraEnabled(): Boolean = dialog?.video?.isCameraEnabled() == true
+
+    fun videoCameraRotationDegrees(): Int = dialog?.video?.localRotationDegrees() ?: 0
+
+    fun isFrontVideoCamera(): Boolean = dialog?.video?.isFrontCameraSelected() != false
+
+    fun setVideoSurfaces(localPreview: Surface?, remoteRender: Surface?) {
+        dialog?.video?.setSurfaces(localPreview, remoteRender)
+    }
+
+    fun toggleVideoCamera(): Boolean {
+        val video = dialog?.video ?: return false
+        return video.setCameraEnabled(!video.isCameraEnabled())
+    }
+
+    fun switchVideoCamera(): Boolean = dialog?.video?.switchCamera() == true
 
     fun toggleHold(): Boolean {
         val call = dialog ?: return false
@@ -274,6 +316,7 @@ internal class TvoiceSipCore(
         keepAlive?.cancel(false)
         registrationRetry?.cancel(false)
         runCatching { dialog?.rtp?.close() }
+        runCatching { dialog?.video?.close() }
         dialog = null
         pendingMessages.clear()
         if (registered && username.isNotEmpty()) runCatching { sendRegister(expires = 0) }
@@ -299,7 +342,7 @@ internal class TvoiceSipCore(
             "CSeq: $registrationCseq REGISTER",
             "Contact: <${contactUri()}>;ob;expires=$expires",
             "Expires: $expires",
-            "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3",
+            "User-Agent: Tvoice/${BuildConfig.VERSION_NAME} TvoiceSipCore/1.8",
             "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE",
             "Supported: path, gruu, outbound"
         )
@@ -321,7 +364,7 @@ internal class TvoiceSipCore(
     private fun sendInvite(call: Dialog, initial: Boolean, hold: Boolean = false) {
         val requestUri = if (initial) "sip:${call.remoteUser}@${SipConfig.DOMAIN}" else call.remoteTarget
         val toTag = call.remoteTag?.let { ";tag=$it" }.orEmpty()
-        val body = localSdp(call.rtp, null, hold)
+        val body = localSdp(call, null, hold)
         val headers = mutableListOf(
             "Via: SIP/2.0/UDP ${hostPort()};rport;branch=${call.inviteBranch}",
             "Max-Forwards: 70",
@@ -332,7 +375,7 @@ internal class TvoiceSipCore(
             "Contact: <${contactUri()}>",
             "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE",
             "Supported: replaces, timer",
-            "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3"
+            "User-Agent: Tvoice/${BuildConfig.VERSION_NAME} TvoiceSipCore/1.8"
         )
         call.routeSet.forEach { headers += "Route: $it" }
         call.authChallenge?.let { challenge ->
@@ -353,7 +396,7 @@ internal class TvoiceSipCore(
             "To: <sip:${call.remoteUser}@${SipConfig.DOMAIN}>${call.remoteTag?.let { ";tag=$it" }.orEmpty()}",
             "Call-ID: ${call.callId}",
             "CSeq: ${call.localCseq} CANCEL",
-            "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3"
+            "User-Agent: Tvoice/${BuildConfig.VERSION_NAME} TvoiceSipCore/1.8"
         )
         sendRequest("CANCEL $uri SIP/2.0", headers, "", call.peer)
     }
@@ -368,7 +411,7 @@ internal class TvoiceSipCore(
             "To: ${response.header("To") ?: "<sip:${call.remoteUser}@${SipConfig.DOMAIN}>"}",
             "Call-ID: ${call.callId}",
             "CSeq: ${response.cseqNumber() ?: call.localCseq} ACK",
-            "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3"
+            "User-Agent: Tvoice/${BuildConfig.VERSION_NAME} TvoiceSipCore/1.8"
         )
         if (!non2xx) call.routeSet.forEach { headers += "Route: $it" }
         sendRequest("ACK $uri SIP/2.0", headers, "", call.peer)
@@ -384,7 +427,7 @@ internal class TvoiceSipCore(
             "Call-ID: ${call.callId}",
             "CSeq: ${call.localCseq} $method",
             "Contact: <${contactUri()}>",
-            "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3"
+            "User-Agent: Tvoice/${BuildConfig.VERSION_NAME} TvoiceSipCore/1.8"
         )
         call.routeSet.forEach { headers += "Route: $it" }
         if (contentType != null) headers += "Content-Type: $contentType"
@@ -404,7 +447,7 @@ internal class TvoiceSipCore(
             "Contact: <${contactUri()}>",
             "Content-Type: text/plain; charset=UTF-8",
             "Accept: text/plain",
-            "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3"
+            "User-Agent: Tvoice/${BuildConfig.VERSION_NAME} TvoiceSipCore/1.8"
         )
         transaction.challenge?.let { challenge ->
             transaction.nonceCount += 1
@@ -446,6 +489,9 @@ internal class TvoiceSipCore(
     }
 
     private fun handleMessage(message: SipMessage, source: InetSocketAddress) {
+        // This client is intentionally bound to one managed PBX. Ignore unsolicited
+        // signaling from arbitrary hosts instead of acting as an open UDP SIP endpoint.
+        if (source.address != server.address) return
         val status = message.statusCode
         if (status != null) handleResponse(message, status, source) else handleRequest(message, source)
     }
@@ -522,7 +568,7 @@ internal class TvoiceSipCore(
                 keepAlive?.cancel(false)
                 keepAlive = worker.schedule({
                     if (running.get() && registered) runCatching { sendRegister(300) }
-                }, 45, TimeUnit.SECONDS)
+                }, 25, TimeUnit.SECONDS)
                 // A server that accepts REGISTER without a challenge first saw the private Contact.
                 // Repeat once with the public received/rport mapping learned from its response.
                 if (mappingChanged) worker.schedule({
@@ -557,8 +603,13 @@ internal class TvoiceSipCore(
             call.remoteTag = headerTag(message.header("To")) ?: call.remoteTag
         }
         when (status) {
-            100, 183 -> listener.onCall(CallState.OutgoingProgress, call.remoteUser, "SIP $status")
-            180 -> listener.onCall(CallState.OutgoingRinging, call.remoteUser, "Телефон звонит")
+            100, 180, 183 -> provisionalCallState(status, call.connected)?.let { state ->
+                // UDP may deliver a delayed/retransmitted 180 after the final 200 OK,
+                // including during hold/resume re-INVITEs. Never re-enable ringback
+                // for an already connected dialog.
+                val detail = if (state == CallState.OutgoingRinging) "Телефон звонит" else "SIP $status"
+                listener.onCall(state, call.remoteUser, detail)
+            }
             401, 407 -> {
                 sendAck(call, message, non2xx = true)
                 // A challenge tag belongs only to the failed transaction. Reusing it would turn
@@ -593,21 +644,43 @@ internal class TvoiceSipCore(
                 }
                 if (!call.connected) {
                     call.remoteMedia = media
+                    call.remoteVideo = RemoteVideoMedia.fromSdp(message.body, source.address)
+                    if (call.video != null && call.remoteVideo == null) {
+                        call.video?.close()
+                        call.video = null
+                    }
+                    call.remoteVideo?.let { videoMedia -> call.video?.updateRemote(videoMedia) }
+                    // Stop every signalling tone synchronously before AudioRecord starts.
+                    // Otherwise a vendor audio stack can feed the ringback tail into the
+                    // microphone and the callee hears it over the caller's first words.
+                    call.connected = true
+                    call.authAttempts = 0
+                    listener.onCall(CallState.Connected, call.remoteUser, "Соединено")
                     try {
-                        call.rtp.start(media)
+                        call.rtp.start(
+                            media,
+                            initialCaptureGuardMs = POST_CONNECT_CAPTURE_GUARD_MS,
+                            initialPlaybackGuardMs = POST_CONNECT_PLAYBACK_GUARD_MS
+                        )
                     } catch (error: Exception) {
                         finishCall(CallState.Error, error.message ?: "Не удалось запустить аудио")
                         return
                     }
                     call.rtp.setMuted(muted)
                     call.rtp.setSpeaker(speaker)
-                    call.connected = true
-                    call.authAttempts = 0
-                    listener.onCall(CallState.Connected, call.remoteUser, "Соединено")
+                    call.remoteVideo?.let { videoMedia -> call.video?.start(videoMedia) }
                     listener.onCall(CallState.StreamsRunning, call.remoteUser, "Аудио G.711")
                 } else {
                     call.remoteMedia = media
                     call.rtp.updateRemote(media)
+                    val updatedVideo = RemoteVideoMedia.fromSdp(message.body, source.address)
+                    call.remoteVideo = updatedVideo
+                    if (updatedVideo != null) {
+                        call.video?.updateRemote(updatedVideo)
+                    } else {
+                        call.video?.close()
+                        call.video = null
+                    }
                     call.pendingHold?.let { target ->
                         call.held = target
                         call.rtp.setHeld(target)
@@ -622,9 +695,31 @@ internal class TvoiceSipCore(
                     call.pendingHold = null
                     listener.onCall(CallState.StreamsRunning, call.remoteUser, "Удержание не поддержано: SIP $status")
                 } else {
-                    finishCall(CallState.Error, "SIP $status ${message.startLine.substringAfter(status.toString()).trim()}")
+                    finishCall(CallState.Error, callFailureMessage(message, status))
                 }
             }
+        }
+    }
+
+    private fun callFailureMessage(message: SipMessage, status: Int): String {
+        val reason = message.header("Reason")
+            ?.substringAfter("text=", "")
+            ?.trim(' ', '"')
+            ?.take(140)
+            .orEmpty()
+        val warning = message.header("Warning")
+            ?.substringAfter(' ', "")
+            ?.trim()
+            ?.take(140)
+            .orEmpty()
+        val detail = reason.ifBlank { warning }
+        val suffix = detail.takeIf(String::isNotBlank)?.let { ": $it" }.orEmpty()
+        return when (status) {
+            404 -> "SIP 404: номер не найден$suffix"
+            480 -> "SIP 480: абонент временно недоступен$suffix"
+            486 -> "SIP 486: абонент занят$suffix"
+            503 -> "SIP 503: FreePBX не нашёл доступный endpoint или маршрут$suffix"
+            else -> "SIP $status ${message.startLine.substringAfter(status.toString()).trim()}$suffix"
         }
     }
 
@@ -695,12 +790,24 @@ internal class TvoiceSipCore(
                 existing.remoteMedia = media
                 existing.rtp.updateRemote(media)
             }
+            val videoMedia = RemoteVideoMedia.fromSdp(message.body, source.address)
+            if (videoMedia != null) {
+                if (existing.video == null) existing.video = createVideoSession()
+                existing.remoteVideo = videoMedia
+                existing.video?.updateRemote(videoMedia)
+            } else {
+                existing.remoteVideo = null
+                existing.video?.close()
+                existing.video = null
+            }
             existing.incomingInvite = message
-            val remoteHold = message.body.contains("a=sendonly", true) || message.body.contains("a=inactive", true)
+            val audioDirection = SdpMediaDirection.of(message.body, "audio")
+            val remoteHold = audioDirection == "sendonly" || audioDirection == "inactive"
             existing.held = remoteHold
             existing.rtp.setHeld(remoteHold)
-            sendResponse(message, 200, "OK", source, existing.localTag, localSdp(existing.rtp, media?.codec ?: AudioCodec.PCMA, false))
+            sendResponse(message, 200, "OK", source, existing.localTag, localSdp(existing, media?.codec ?: AudioCodec.PCMA, false))
             listener.onCall(if (remoteHold) CallState.Paused else CallState.StreamsRunning, existing.remoteUser, if (remoteHold) "Собеседник удерживает звонок" else "Соединено")
+            videoMedia?.let { existing.video?.start(it) }
             return
         }
         if (existing != null) {
@@ -714,7 +821,11 @@ internal class TvoiceSipCore(
             sendResponse(message, 488, "Not Acceptable Here", source)
             return
         }
+        val remoteVideo = RemoteVideoMedia.fromSdp(message.body, source.address)
+        if (remoteVideo != null) speaker = shouldUseSpeakerForVideo()
         val session = RtpAudioSession(appContext)
+        val videoSession = if (remoteVideo != null) createVideoSession() else null
+        if (remoteVideo != null) videoSession?.updateRemote(remoteVideo)
         val call = Dialog(
             direction = Direction.INCOMING,
             remoteUser = remoteUser,
@@ -728,7 +839,9 @@ internal class TvoiceSipCore(
             remoteTarget = headerUri(message.header("Contact")) ?: remoteUri,
             routeSet = message.headers("Record-Route"),
             rtp = session,
+            video = videoSession,
             remoteMedia = remoteMedia,
+            remoteVideo = remoteVideo,
             incomingInvite = message
         )
         dialog = call
@@ -754,6 +867,7 @@ internal class TvoiceSipCore(
         if (!call.connected) {
             try {
                 call.rtp.start(media)
+                call.remoteVideo?.let { videoMedia -> call.video?.start(videoMedia) }
             } catch (error: Exception) {
                 finishCall(CallState.Error, error.message ?: "Не удалось запустить аудио")
                 return
@@ -783,7 +897,7 @@ internal class TvoiceSipCore(
         request.header("CSeq")?.let { headers += "CSeq: $it" }
         headers += "Contact: <${contactUri()}>"
         headers += "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE"
-        headers += "User-Agent: Tvoice/0.9 TvoiceSipCore/1.3"
+        headers += "User-Agent: Tvoice/${BuildConfig.VERSION_NAME} TvoiceSipCore/1.8"
         if (body.isNotEmpty()) headers += "Content-Type: application/sdp"
         sendRequest("SIP/2.0 $code $reason", headers, body, target)
     }
@@ -800,7 +914,7 @@ internal class TvoiceSipCore(
         sipSocket.send(DatagramPacket(bytes, bytes.size, target))
     }
 
-    private fun localSdp(session: RtpAudioSession, selected: AudioCodec?, hold: Boolean): String {
+    private fun localSdp(call: Dialog, selected: AudioCodec?, hold: Boolean): String {
         val address = localAddress.hostAddress
         val sessionId = System.currentTimeMillis()
         val payloads = if (selected == null) "8 0 101" else "${selected.payloadType} 101"
@@ -810,13 +924,32 @@ internal class TvoiceSipCore(
             append("s=Tvoice\r\n")
             append("c=IN IP4 $address\r\n")
             append("t=0 0\r\n")
-            append("m=audio ${session.localPort} RTP/AVP $payloads\r\n")
+            append("m=audio ${call.rtp.localPort} RTP/AVP $payloads\r\n")
             if (selected == null || selected == AudioCodec.PCMA) append("a=rtpmap:8 PCMA/8000\r\n")
             if (selected == null || selected == AudioCodec.PCMU) append("a=rtpmap:0 PCMU/8000\r\n")
             append("a=rtpmap:101 telephone-event/8000\r\n")
             append("a=fmtp:101 0-16\r\n")
             append("a=ptime:20\r\n")
             append(if (hold) "a=sendonly\r\n" else "a=sendrecv\r\n")
+            call.video?.let { video ->
+                val payload = call.remoteVideo?.payloadType ?: VIDEO_PAYLOAD_TYPE
+                append("m=video ${video.localPort} RTP/AVP $payload\r\n")
+                append("a=rtpmap:$payload H264/90000\r\n")
+                append("a=fmtp:$payload packetization-mode=1;profile-level-id=42e01f;level-asymmetry-allowed=1\r\n")
+                append("a=extmap:4 urn:3gpp:video-orientation\r\n")
+                append("a=framerate:24\r\n")
+                append(
+                    when {
+                        hold -> "a=inactive\r\n"
+                        call.remoteVideo == null && video.canCapture -> "a=sendrecv\r\n"
+                        call.remoteVideo == null -> "a=recvonly\r\n"
+                        video.canCapture && call.remoteVideo?.sendsVideo == true && call.remoteVideo?.receivesVideo == true -> "a=sendrecv\r\n"
+                        video.canCapture && call.remoteVideo?.receivesVideo == true -> "a=sendonly\r\n"
+                        call.remoteVideo?.sendsVideo == true -> "a=recvonly\r\n"
+                        else -> "a=inactive\r\n"
+                    }
+                )
+            }
         }
     }
 
@@ -824,10 +957,52 @@ internal class TvoiceSipCore(
         val call = dialog ?: return
         dialog = null
         runCatching { call.rtp.close() }
+        runCatching { call.video?.close() }
         muted = false
         speaker = false
         listener.onCall(state, call.remoteUser, message)
         listener.onCall(CallState.Released, call.remoteUser, message)
+    }
+
+    private fun createVideoSession(): RtpVideoSession = RtpVideoSession(
+        appContext,
+        errorListener = { message ->
+            worker.execute {
+                val call = dialog ?: return@execute
+                listener.onCall(CallState.StreamsRunning, call.remoteUser, "Видео: $message")
+            }
+        },
+        remoteRotationListener = { rotation ->
+            worker.execute {
+                val call = dialog ?: return@execute
+                listener.onCall(CallState.StreamsRunning, call.remoteUser, "Видео:rotation=$rotation")
+            }
+        },
+        localRotationListener = { rotation ->
+            worker.execute {
+                val call = dialog ?: return@execute
+                listener.onCall(CallState.StreamsRunning, call.remoteUser, "Видео:local-rotation=$rotation")
+            }
+        }
+    )
+
+    private fun shouldUseSpeakerForVideo(): Boolean {
+        val external = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { device ->
+            device.type in setOf(
+                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                AudioDeviceInfo.TYPE_USB_HEADSET
+            ) || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && device.type == AudioDeviceInfo.TYPE_BLE_HEADSET)
+        }
+        return !external
+    }
+
+    private companion object {
+        const val VIDEO_PAYLOAD_TYPE = 96
+        const val POST_CONNECT_CAPTURE_GUARD_MS = 1_100L
+        const val POST_CONNECT_PLAYBACK_GUARD_MS = 450L
     }
 
     private fun failMessage(transaction: MessageTransaction, message: String) {
@@ -858,12 +1033,49 @@ internal class TvoiceSipCore(
         }, delay, TimeUnit.SECONDS)
     }
 
-    private fun resolveLocalAddress(): InetAddress = runCatching {
-        DatagramSocket().use { probe ->
-            probe.connect(server)
-            probe.localAddress
-        }
-    }.getOrElse { InetAddress.getByName("0.0.0.0") }
+    private fun resolveLocalAddress(): InetAddress {
+        // DatagramSocket.connect() may still report the wildcard address on some
+        // Android network stacks until the first packet is sent. Advertising that
+        // value in SDP is not harmless: RFC-compatible PBXs interpret 0.0.0.0 as
+        // hold and start MusicOnHold even though the call timer is already running.
+        val activeNetworkAddress = runCatching {
+            val connectivity = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            connectivity.activeNetwork
+                ?.let(connectivity::getLinkProperties)
+                ?.linkAddresses
+                ?.asSequence()
+                ?.map { it.address }
+                ?.firstOrNull(::isUsableIpv4Address)
+        }.getOrNull()
+        if (activeNetworkAddress != null) return activeNetworkAddress
+
+        val routedAddress = runCatching {
+            DatagramSocket().use { probe ->
+                probe.connect(server)
+                probe.localAddress.takeIf(::isUsableIpv4Address)
+            }
+        }.getOrNull()
+        if (routedAddress != null) return routedAddress
+
+        val interfaceAddress = runCatching {
+            Collections.list(NetworkInterface.getNetworkInterfaces())
+                .asSequence()
+                .filter { it.isUp && !it.isLoopback }
+                .flatMap { Collections.list(it.inetAddresses).asSequence() }
+                .firstOrNull(::isUsableIpv4Address)
+        }.getOrNull()
+        if (interfaceAddress != null) return interfaceAddress
+
+        // Registration cannot provide usable RTP without a real interface. Keep a
+        // non-hold address here so the SIP state remains valid until network retry.
+        return InetAddress.getLoopbackAddress()
+    }
+
+    private fun isUsableIpv4Address(address: InetAddress): Boolean =
+        address is Inet4Address &&
+            !address.isAnyLocalAddress &&
+            !address.isLoopbackAddress &&
+            !address.isLinkLocalAddress
 
     private fun contactUri(): String = "sip:$username@${contactHostPort()};transport=udp"
 

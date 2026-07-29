@@ -5,7 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 data class ChatMessage(
-    val id: Long,
+    val id: String,
     val owner: String,
     val peer: String,
     val text: String,
@@ -15,7 +15,8 @@ data class ChatMessage(
     val attachmentId: String? = null,
     val attachmentName: String? = null,
     val attachmentMime: String? = null,
-    val attachmentSize: Long = 0
+    val attachmentSize: Long = 0,
+    val deliveryError: String? = null
 )
 
 data class ChatConversation(
@@ -27,8 +28,10 @@ data class ChatConversation(
 
 /** Keeps a small local history so conversations survive process restarts. */
 object ChatStore {
-    private const val PREFERENCES = "tvoice_chat_v1"
+    private const val PREFERENCES = "tvoice_secure_chat_v2"
+    private const val LEGACY_PREFERENCES = "tvoice_chat_v1"
     private const val KEY_MESSAGES = "messages"
+    private const val KEY_ALIAS = "tvoice_chat_cache_key_v2"
     private const val MAX_MESSAGES = 500
     private val messages = mutableListOf<ChatMessage>()
     private var context: Context? = null
@@ -37,17 +40,25 @@ object ChatStore {
     fun initialize(value: Context) {
         if (context != null) return
         context = value.applicationContext
-        val raw = context?.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
-            ?.getString(KEY_MESSAGES, null) ?: return
-        runCatching {
+        val appContext = checkNotNull(context)
+        val encoded = appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+            .getString(KEY_MESSAGES, null)
+        val legacy = if (encoded == null) {
+            appContext.getSharedPreferences(LEGACY_PREFERENCES, Context.MODE_PRIVATE)
+                .getString(KEY_MESSAGES, null)
+        } else null
+        val raw = runCatching {
+            encoded?.let { AndroidKeystoreCipher.decrypt(KEY_ALIAS, it).toString(Charsets.UTF_8) } ?: legacy
+        }.getOrNull() ?: return
+        val restored = runCatching {
             val array = JSONArray(raw)
-            for (index in 0 until array.length()) {
+            List(array.length()) { index ->
                 val item = array.getJSONObject(index)
                 val storedStatus = item.optString("status", "sent")
-                messages += ChatMessage(
-                    id = item.optLong("id"),
-                    owner = item.optString("owner"),
-                    peer = item.optString("peer"),
+                ChatMessage(
+                    id = item.optString("id"),
+                    owner = SipIdentity.normalize(item.optString("owner")),
+                    peer = SipIdentity.normalize(item.optString("peer")),
                     text = item.optString("text"),
                     incoming = item.optBoolean("incoming"),
                     timestamp = item.optLong("timestamp"),
@@ -55,9 +66,15 @@ object ChatStore {
                     attachmentId = item.optString("attachmentId").takeIf(String::isNotBlank),
                     attachmentName = item.optString("attachmentName").takeIf(String::isNotBlank),
                     attachmentMime = item.optString("attachmentMime").takeIf(String::isNotBlank),
-                    attachmentSize = item.optLong("attachmentSize")
+                    attachmentSize = item.optLong("attachmentSize"),
+                    deliveryError = item.optString("deliveryError").takeIf(String::isNotBlank)
                 )
             }
+        }.getOrNull() ?: return
+        messages += restored
+        if (legacy != null) {
+            persist()
+            appContext.getSharedPreferences(LEGACY_PREFERENCES, Context.MODE_PRIVATE).edit().clear().apply()
         }
     }
 
@@ -89,7 +106,29 @@ object ChatStore {
     fun markLatest(owner: String, peer: String, text: String, delivered: Boolean) {
         val index = messages.indexOfLast { !it.incoming && it.owner == owner && it.peer == peer && it.text == text && it.status == "sending" }
         if (index < 0) return
-        messages[index] = messages[index].copy(status = if (delivered) "sent" else "failed")
+        messages[index] = messages[index].copy(
+            status = if (delivered) "sent" else "failed",
+            deliveryError = if (delivered) null else "Не удалось доставить сообщение"
+        )
+        persist()
+    }
+
+    @Synchronized
+    fun markOutgoing(localId: String, delivered: Boolean, error: String? = null) {
+        val index = messages.indexOfFirst { !it.incoming && it.id == localId }
+        if (index < 0) return
+        messages[index] = messages[index].copy(
+            status = if (delivered) "sent" else "failed",
+            deliveryError = if (delivered) null else error
+        )
+        persist()
+    }
+
+    @Synchronized
+    fun markSending(localId: String) {
+        val index = messages.indexOfFirst { !it.incoming && it.id == localId }
+        if (index < 0) return
+        messages[index] = messages[index].copy(status = "sending", deliveryError = null)
         persist()
     }
 
@@ -98,17 +137,16 @@ object ChatStore {
         owner: String,
         peer: String,
         text: String,
-        serverId: Long,
+        localId: String,
+        serverId: String,
         timestamp: Long,
         attachmentId: String? = null,
         attachmentName: String? = null,
         attachmentMime: String? = null,
-        attachmentSize: Long = 0
+        attachmentSize: Long = 0,
+        status: String = "sent"
     ): ChatMessage {
-        val placeholderIndex = messages.indexOfLast {
-            !it.incoming && it.owner == owner && it.peer == peer &&
-                it.text == text && it.status == "sending"
-        }
+        val placeholderIndex = messages.indexOfFirst { !it.incoming && it.owner == owner && it.id == localId }
         val serverIndex = messages.indexOfFirst {
             it.owner == owner && it.peer == peer && it.id == serverId
         }
@@ -119,7 +157,7 @@ object ChatStore {
             text = text,
             incoming = false,
             timestamp = timestamp,
-            status = "sent",
+            status = status,
             attachmentId = attachmentId,
             attachmentName = attachmentName,
             attachmentMime = attachmentMime,
@@ -143,14 +181,15 @@ object ChatStore {
     fun upsertServer(
         owner: String,
         peer: String,
-        serverId: Long,
+        serverId: String,
         text: String,
         incoming: Boolean,
         timestamp: Long,
         attachmentId: String? = null,
         attachmentName: String? = null,
         attachmentMime: String? = null,
-        attachmentSize: Long = 0
+        attachmentSize: Long = 0,
+        serverStatus: String = "sent"
     ): ChatMessage {
         val index = messages.indexOfFirst {
             it.owner == owner && it.peer == peer && it.id == serverId
@@ -163,7 +202,7 @@ object ChatStore {
             text = text,
             incoming = incoming,
             timestamp = timestamp,
-            status = if (incoming && existingStatus == "read") "read" else if (incoming) "received" else "sent",
+            status = if (incoming && existingStatus == "read") "read" else if (incoming) "received" else newerStatus(existingStatus, serverStatus),
             attachmentId = attachmentId,
             attachmentName = attachmentName,
             attachmentMime = attachmentMime,
@@ -179,7 +218,10 @@ object ChatStore {
         var changed = false
         messages.indices.forEach { index ->
             if (messages[index].status == "sending") {
-                messages[index] = messages[index].copy(status = "failed")
+                messages[index] = messages[index].copy(
+                    status = "failed",
+                    deliveryError = "Соединение было прервано"
+                )
                 changed = true
             }
         }
@@ -187,12 +229,15 @@ object ChatStore {
     }
 
     @Synchronized
-    fun messages(owner: String, peer: String): List<ChatMessage> =
-        messages.filter { it.owner == owner && it.peer == peer }.sortedBy { it.timestamp }
+    fun messages(owner: String, peer: String): List<ChatMessage> {
+        val normalizedOwner = SipIdentity.normalize(owner)
+        val normalizedPeer = SipIdentity.normalize(peer)
+        return messages.filter { it.owner == normalizedOwner && it.peer == normalizedPeer }.sortedBy { it.timestamp }
+    }
 
     @Synchronized
     fun conversations(owner: String): List<ChatConversation> = messages
-        .filter { it.owner == owner }
+        .filter { it.owner == SipIdentity.normalize(owner) }
         .groupBy { it.peer }
         .mapNotNull { (peer, values) ->
             values.maxByOrNull { it.timestamp }?.let { last ->
@@ -202,13 +247,36 @@ object ChatStore {
         .sortedByDescending { it.timestamp }
 
     @Synchronized
-    fun markRead(owner: String, peer: String) {
+    fun markRead(owner: String, peer: String): Boolean {
+        val normalizedOwner = SipIdentity.normalize(owner)
+        val normalizedPeer = SipIdentity.normalize(peer)
         var changed = false
         messages.indices.forEach { index ->
             val item = messages[index]
-            if (item.owner == owner && item.peer == peer && item.incoming && item.status == "received") {
+            if (item.owner == normalizedOwner && item.peer == normalizedPeer && item.incoming && item.status == "received") {
                 messages[index] = item.copy(status = "read")
                 changed = true
+            }
+        }
+        if (changed) persist()
+        return changed
+    }
+
+    @Synchronized
+    fun markOutgoingReceipt(owner: String, peer: String, throughTimestamp: Long, receiptStatus: String) {
+        val normalizedOwner = SipIdentity.normalize(owner)
+        val normalizedPeer = SipIdentity.normalize(peer)
+        var changed = false
+        messages.indices.forEach { index ->
+            val item = messages[index]
+            if (!item.incoming && item.owner == normalizedOwner && item.peer == normalizedPeer &&
+                !item.id.startsWith("local-") && item.timestamp <= throughTimestamp
+            ) {
+                val next = newerStatus(item.status, receiptStatus)
+                if (next != item.status) {
+                    messages[index] = item.copy(status = next, deliveryError = null)
+                    changed = true
+                }
             }
         }
         if (changed) persist()
@@ -225,9 +293,9 @@ object ChatStore {
         attachmentSize: Long = 0
     ): ChatMessage {
         val item = ChatMessage(
-            id = System.currentTimeMillis() * 1000 + (messages.size % 1000),
-            owner = owner,
-            peer = peer,
+            id = "local-${System.currentTimeMillis()}-${messages.size % 1000}",
+            owner = SipIdentity.normalize(owner),
+            peer = SipIdentity.normalize(peer),
             text = text,
             incoming = incoming,
             timestamp = System.currentTimeMillis(),
@@ -246,6 +314,11 @@ object ChatStore {
         persist()
     }
 
+    private fun newerStatus(current: String?, candidate: String): String {
+        val rank = mapOf("failed" to -1, "sending" to 0, "sent" to 1, "delivered" to 2, "read" to 3)
+        return if ((rank[candidate] ?: 1) >= (rank[current] ?: 0)) candidate else current.orEmpty()
+    }
+
     private fun persist() {
         val appContext = context ?: return
         val array = JSONArray()
@@ -262,9 +335,11 @@ object ChatStore {
                 put("attachmentName", item.attachmentName ?: "")
                 put("attachmentMime", item.attachmentMime ?: "")
                 put("attachmentSize", item.attachmentSize)
+                put("deliveryError", item.deliveryError ?: "")
             })
         }
+        val encoded = AndroidKeystoreCipher.encrypt(KEY_ALIAS, array.toString().toByteArray())
         appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
-            .edit().putString(KEY_MESSAGES, array.toString()).apply()
+            .edit().putString(KEY_MESSAGES, encoded).apply()
     }
 }

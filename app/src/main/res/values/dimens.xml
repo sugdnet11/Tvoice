@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="space_1">4dp</dimen>
+    <dimen name="space_2">8dp</dimen>
+    <dimen name="space_3">12dp</dimen>
+    <dimen name="screen_horizontal">16dp</dimen>
+    <dimen name="list_row_height">62dp</dimen>
+    <dimen name="avatar_list">40dp</dimen>
+    <dimen name="avatar_chat_header">36dp</dimen>
+    <dimen name="avatar_profile">64dp</dimen>
+    <dimen name="bottom_navigation_height">62dp</dimen>
+    <dimen name="bottom_navigation_icon">22dp</dimen>
+    <dimen name="touch_target">48dp</dimen>
+    <dimen name="divider">1dp</dimen>
+    <dimen name="search_height">40dp</dimen>
+    <dimen name="search_radius">10dp</dimen>
+    <dimen name="message_radius">14dp</dimen>
+    <dimen name="field_height">54dp</dimen>
+    <dimen name="field_radius">12dp</dimen>
+    <dimen name="fab_size">54dp</dimen>
+</resources>

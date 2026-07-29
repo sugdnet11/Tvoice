@@ -22,8 +22,8 @@ android {
         applicationId = "tj.tvoice.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.9.0"
+        versionCode = 25
+        versionName = "0.17.3"
     }
 
     signingConfigs {
@@ -42,7 +42,8 @@ android {
             if (hasPermanentSigning) signingConfig = signingConfigs.getByName("tvoicePermanent")
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             if (hasPermanentSigning) signingConfig = signingConfigs.getByName("tvoicePermanent")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
@@ -53,6 +54,18 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
+    packaging {
+        resources.excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1")
+    }
 }
 
 dependencies {
@@ -60,5 +73,7 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("io.livekit:livekit-android:2.27.0")
     testImplementation("junit:junit:4.13.2")
 }
