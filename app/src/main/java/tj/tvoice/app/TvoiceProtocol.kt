@@ -1,6 +1,8 @@
 package tj.tvoice.app
 
 import java.security.MessageDigest
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.util.Locale
 import java.util.concurrent.ThreadLocalRandom
 
@@ -24,6 +26,15 @@ enum class CallState {
 
 enum class MessageState {
     Sending, Sent, Received, Error
+}
+
+internal fun provisionalCallState(status: Int, connected: Boolean): CallState? {
+    if (connected) return null
+    return when (status) {
+        100, 183 -> CallState.OutgoingProgress
+        180 -> CallState.OutgoingRinging
+        else -> null
+    }
 }
 
 internal data class SipMessage(
@@ -59,7 +70,14 @@ internal data class SipMessage(
 
     companion object {
         fun parse(data: ByteArray, length: Int): SipMessage? {
-            val text = data.copyOf(length).toString(Charsets.UTF_8)
+            if (length !in 1..minOf(data.size, MAX_MESSAGE_BYTES)) return null
+            val text = runCatching {
+                Charsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(data, 0, length))
+                    .toString()
+            }.getOrNull() ?: return null
             val divider = when {
                 "\r\n\r\n" in text -> "\r\n\r\n"
                 "\n\n" in text -> "\n\n"
@@ -69,25 +87,51 @@ internal data class SipMessage(
             val body = if (divider == null) "" else text.substringAfter(divider)
             val lines = head.split(Regex("\r?\n"))
             val start = lines.firstOrNull()?.trim().orEmpty()
-            if (start.isEmpty()) return null
+            if (!isValidStartLine(start) || lines.size > MAX_HEADER_COUNT) return null
 
             val values = linkedMapOf<String, MutableList<String>>()
             var lastName: String? = null
             for (line in lines.drop(1)) {
+                if (line.length > MAX_HEADER_LINE_CHARS || '\u0000' in line) return null
                 if ((line.startsWith(' ') || line.startsWith('\t')) && lastName != null) {
                     val list = values[lastName] ?: continue
                     list[list.lastIndex] = list.last() + " " + line.trim()
                     continue
                 }
                 val colon = line.indexOf(':')
-                if (colon <= 0) continue
+                if (colon <= 0) return null
                 val name = line.substring(0, colon).trim().lowercase(Locale.US)
+                if (!name.matches(HEADER_NAME)) return null
                 val value = line.substring(colon + 1).trim()
                 values.getOrPut(name) { mutableListOf() }.add(value)
                 lastName = name
             }
-            return SipMessage(start, values, body)
+            val lengthHeaders = values["content-length"].orEmpty() + values["l"].orEmpty()
+            val parsedLengths = lengthHeaders.map { it.toIntOrNull() ?: return null }
+            if (parsedLengths.any { it < 0 } || parsedLengths.distinct().size > 1) return null
+            val declaredLength = parsedLengths.firstOrNull()
+            val normalizedBody = if (declaredLength == null) body else {
+                val bytes = body.toByteArray(Charsets.UTF_8)
+                if (bytes.size < declaredLength) return null
+                bytes.copyOfRange(0, declaredLength).toString(Charsets.UTF_8)
+            }
+            return SipMessage(start, values, normalizedBody)
         }
+
+        private fun isValidStartLine(value: String): Boolean {
+            if (value.length > 1_024 || '\r' in value || '\n' in value) return false
+            if (value.startsWith("SIP/2.0 ")) {
+                return value.split(' ').getOrNull(1)?.toIntOrNull() in 100..699
+            }
+            val parts = value.split(' ')
+            return parts.size == 3 && parts[0].matches(Regex("[A-Z]+")) &&
+                parts[1].startsWith("sip:", ignoreCase = true) && parts[2] == "SIP/2.0"
+        }
+
+        private const val MAX_MESSAGE_BYTES = 65_535
+        private const val MAX_HEADER_COUNT = 256
+        private const val MAX_HEADER_LINE_CHARS = 8_192
+        private val HEADER_NAME = Regex("[A-Za-z0-9!#$%&'*+.^_`|~-]+")
     }
 }
 
@@ -126,8 +170,14 @@ internal object DigestAuth {
         cnonceOverride: String? = null
     ): String {
         require(challenge.algorithm.equals("MD5", true)) { "Сервер запросил неподдерживаемый алгоритм ${challenge.algorithm}" }
+        require(listOf(username, challenge.realm, challenge.nonce, uri).none { '\r' in it || '\n' in it }) {
+            "Недопустимые символы в SIP-аутентификации"
+        }
         val nc = nonceCount.toString(16).padStart(8, '0')
         val cnonce = cnonceOverride ?: randomHex(8)
+        require(listOf(cnonce, challenge.opaque.orEmpty()).none { '\r' in it || '\n' in it }) {
+            "Недопустимые символы в SIP-аутентификации"
+        }
         val ha1 = md5("$username:${challenge.realm}:$password")
         val ha2 = md5("$method:$uri")
         val response = if (challenge.qop != null) {
@@ -136,20 +186,22 @@ internal object DigestAuth {
             md5("$ha1:${challenge.nonce}:$ha2")
         }
         return buildString {
-            append("Digest username=\"").append(username).append("\"")
-            append(", realm=\"").append(challenge.realm).append("\"")
-            append(", nonce=\"").append(challenge.nonce).append("\"")
-            append(", uri=\"").append(uri).append("\"")
+            append("Digest username=\"").append(quoted(username)).append("\"")
+            append(", realm=\"").append(quoted(challenge.realm)).append("\"")
+            append(", nonce=\"").append(quoted(challenge.nonce)).append("\"")
+            append(", uri=\"").append(quoted(uri)).append("\"")
             append(", response=\"").append(response).append("\"")
             append(", algorithm=MD5")
             if (challenge.qop != null) {
                 append(", qop=").append(challenge.qop)
                 append(", nc=").append(nc)
-                append(", cnonce=\"").append(cnonce).append("\"")
+                append(", cnonce=\"").append(quoted(cnonce)).append("\"")
             }
-            challenge.opaque?.let { append(", opaque=\"").append(it).append("\"") }
+            challenge.opaque?.let { append(", opaque=\"").append(quoted(it)).append("\"") }
         }
     }
+
+    private fun quoted(value: String): String = value.replace("\\", "\\\\").replace("\"", "\\\"")
 
     private fun md5(value: String): String = MessageDigest.getInstance("MD5")
         .digest(value.toByteArray(Charsets.UTF_8))
@@ -244,6 +296,31 @@ internal fun headerUri(value: String?): String? {
 
 /** Only provisional/success responses establish an early or confirmed dialog tag. */
 internal fun responseEstablishesDialog(status: Int): Boolean = status in 101..299
+
+internal object SdpMediaDirection {
+    fun of(sdp: String, media: String): String {
+        var inTarget = false
+        var found = false
+        var direction = "sendrecv"
+        sdp.lineSequence().map { it.trim() }.forEach { line ->
+            if (line.startsWith("m=", true)) {
+                inTarget = line.startsWith("m=$media ", true)
+                if (inTarget) {
+                    found = true
+                    direction = "sendrecv"
+                }
+            } else if (inTarget) {
+                when {
+                    line.equals("a=sendonly", true) -> direction = "sendonly"
+                    line.equals("a=recvonly", true) -> direction = "recvonly"
+                    line.equals("a=inactive", true) -> direction = "inactive"
+                    line.equals("a=sendrecv", true) -> direction = "sendrecv"
+                }
+            }
+        }
+        return direction.takeIf { found } ?: "inactive"
+    }
+}
 
 internal data class ViaMapping(val address: String, val port: Int) {
     companion object {

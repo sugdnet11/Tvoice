@@ -10,6 +10,9 @@ Tvoice uses the following components without changing their ownership:
 | Material Design Icons | Apache License 2.0 | https://github.com/google/material-design-icons |
 | OkHttp | Apache License 2.0 | https://square.github.io/okhttp/ |
 | Okio | Apache License 2.0 | https://square.github.io/okio/ |
+| LiveKit Android SDK | Apache License 2.0 | https://github.com/livekit/client-sdk-android |
+| LiveKit Server | Apache License 2.0 | https://github.com/livekit/livekit |
+| WebRTC | BSD 3-Clause License | https://webrtc.googlesource.com/src/ |
 | JUnit (tests only) | Eclipse Public License 1.0 | https://junit.org/junit4/ |
 
 The Apache License 2.0 text is available at:

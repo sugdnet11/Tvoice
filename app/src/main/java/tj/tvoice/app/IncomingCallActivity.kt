@@ -21,12 +21,13 @@ import androidx.core.view.WindowInsetsCompat
 /** Lock-screen-safe incoming call screen, launched by the native CallStyle notification. */
 class IncomingCallActivity : Activity(), SipManager.Observer {
     private var remote = "Неизвестный"
-    private val blue = Color.rgb(26, 76, 221)
-    private val dark = Color.rgb(10, 33, 74)
-    private val muted = Color.rgb(100, 116, 139)
-    private val incomingPage = Color.rgb(239, 245, 255)
-    private val green = Color.rgb(34, 197, 94)
-    private val red = Color.rgb(239, 68, 68)
+    private var answerRequested = false
+    private val blue: Int get() = TvoiceUi.color(this, R.color.tvoice_blue)
+    private val dark: Int get() = TvoiceUi.color(this, R.color.tvoice_text_primary)
+    private val muted: Int get() = TvoiceUi.color(this, R.color.tvoice_text_secondary)
+    private val incomingPage: Int get() = TvoiceUi.color(this, R.color.tvoice_blue_soft)
+    private val green: Int get() = TvoiceUi.color(this, R.color.tvoice_green)
+    private val red: Int get() = TvoiceUi.color(this, R.color.tvoice_red)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,6 +54,7 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
 
     override fun onResume() {
         super.onResume()
+        if (answerRequested || isFinishing || TvoiceRuntime.callState != CallState.IncomingReceived) return
         startService(
             Intent(this, TvoiceCallService::class.java)
                 .setAction(TvoiceCallService.ACTION_INCOMING_SCREEN_VISIBLE)
@@ -106,31 +108,28 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
         }
         root.addView(TextView(this).apply {
             text = "Tvoice"
-            textSize = 16f
-            setTextColor(blue)
-            typeface = Typeface.DEFAULT_BOLD
+            TvoiceUi.style(this, TvoiceUi.SCREEN_TITLE_SP, blue, TvoiceUi.semiBold())
             gravity = Gravity.CENTER
         }, LinearLayout.LayoutParams(-1, -2))
         val avatar = TextView(this).apply {
             text = remote.take(2)
-            textSize = 34f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
+            TvoiceUi.style(this, TvoiceUi.PAGE_TITLE_SP, Color.WHITE, TvoiceUi.bold())
             gravity = Gravity.CENTER
             background = circle(blue)
         }
-        root.addView(avatar, LinearLayout.LayoutParams(dp(104), dp(104)).apply { topMargin = dp(72) })
+        root.addView(avatar, LinearLayout.LayoutParams(dp(96), dp(96)).apply { topMargin = dp(64) })
         root.addView(TextView(this).apply {
             text = remote
-            textSize = 38f
-            setTextColor(dark)
-            typeface = Typeface.DEFAULT_BOLD
+            TvoiceUi.style(this, TvoiceUi.CALL_NUMBER_SP, dark, TvoiceUi.bold())
             gravity = Gravity.CENTER
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(28) })
         root.addView(TextView(this).apply {
-            text = t("Входящий вызов Tvoice", "Занги воридотии Tvoice")
-            textSize = 17f
-            setTextColor(muted)
+            text = if (TvoiceRuntime.isVideoCall) {
+                t("Входящий видеозвонок Tvoice", "Занги видеоии воридотии Tvoice")
+            } else {
+                t("Входящий вызов Tvoice", "Занги воридотии Tvoice")
+            }
+            TvoiceUi.style(this, TvoiceUi.SCREEN_TITLE_SP, muted)
             gravity = Gravity.CENTER
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
         root.addView(Space(this), LinearLayout.LayoutParams(1, 0, 1f))
@@ -150,7 +149,12 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
     }
 
     private fun answer() {
-        TvoiceRuntime.accept()
+        if (answerRequested) return
+        answerRequested = true
+        startService(
+            Intent(this, TvoiceCallService::class.java)
+                .setAction(TvoiceCallService.ACTION_ANSWER)
+        )
         startActivity(
             Intent(this, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -173,8 +177,7 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
             addView(image, LinearLayout.LayoutParams(dp(76), dp(76)))
             addView(TextView(this@IncomingCallActivity).apply {
                 text = label
-                textSize = 14f
-                setTextColor(dark)
+                TvoiceUi.style(this, TvoiceUi.BUTTON_SP, dark, TvoiceUi.semiBold())
                 gravity = Gravity.CENTER
             }, LinearLayout.LayoutParams(-1, dp(36)).apply { topMargin = dp(6) })
         }
@@ -198,11 +201,7 @@ class IncomingCallActivity : Activity(), SipManager.Observer {
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-    @Suppress("DiscouragedApi")
-    private fun statusBarHeight(): Int {
-        val resourceId = resources.getIdentifier("status_bar_height", "dimen", "android")
-        return if (resourceId > 0) resources.getDimensionPixelSize(resourceId) else dp(24)
-    }
+    private fun statusBarHeight(): Int = dp(24)
     private fun t(russian: String, tajik: String): String =
         if (getSharedPreferences("tvoice", MODE_PRIVATE).getString("language", "ru") == "tg") tajik else russian
 
