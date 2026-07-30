@@ -15,6 +15,7 @@ final class AppModel: ObservableObject {
     let callKit: CallKitManager
     let sipEngine = NativeSipEngine()
     private var cancellables = Set<AnyCancellable>()
+    private var sipCallKitID: String?
 
     init(api: ChatAPIClient? = nil, callKit: CallKitManager = CallKitManager()) {
         self.api = api ?? ChatAPIClient()
@@ -63,8 +64,8 @@ final class AppModel: ObservableObject {
 
     func logout() {
         api.logout()
-        sipEngine.unregister()
         sipEngine.endCall()
+        sipEngine.unregister()
         KeychainStore.clear()
         user = nil
         activeVideoCall = nil
@@ -87,11 +88,34 @@ final class AppModel: ObservableObject {
             LocalCallHistoryStore.saveCall(sipNumber: peer, displayName: peer, direction: "outgoing", isVideo: false)
             activeAudioCallPeer = peer
             try await sipEngine.startAudioCall(peer: peer)
-            let callId = UUID().uuidString
+            let callId = sipEngine.currentCallID ?? UUID().uuidString
+            sipCallKitID = callId
             callKit.reportOutgoing(callID: callId, peer: peer, type: .sipAudio)
         } catch {
             activeAudioCallPeer = nil
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func answerIncomingAudioCall() {
+        if let callID = sipCallKitID {
+            callKit.answer(callID: callID)
+        } else {
+            sipEngine.acceptCall()
+        }
+    }
+
+    func rejectIncomingAudioCall() {
+        sipEngine.rejectCall()
+        if let callID = sipCallKitID {
+            callKit.end(callID: callID)
+        }
+    }
+
+    func finishAudioCall() {
+        sipEngine.endCall()
+        if let callID = sipCallKitID {
+            callKit.end(callID: callID)
         }
     }
 
@@ -120,6 +144,34 @@ final class AppModel: ObservableObject {
     }
 
     private func bindCalls() {
+        sipEngine.$callState
+            .removeDuplicates()
+            .sink { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case let .incoming(peer):
+                    self.activeAudioCallPeer = peer
+                    guard self.sipCallKitID == nil else { return }
+                    let callID = self.sipEngine.currentCallID ?? UUID().uuidString
+                    self.sipCallKitID = callID
+                    self.callKit.reportIncoming(callID: callID, peer: peer, type: .sipAudio)
+                case let .connected(peer):
+                    self.activeAudioCallPeer = peer
+                    if let callID = self.sipCallKitID {
+                        self.callKit.reportConnected(callID: callID)
+                    }
+                case .idle, .failed:
+                    self.activeAudioCallPeer = nil
+                    if let callID = self.sipCallKitID {
+                        self.sipCallKitID = nil
+                        self.callKit.end(callID: callID)
+                    }
+                case .calling:
+                    break
+                }
+            }
+            .store(in: &cancellables)
+
         api.$incomingVideoCall
             .compactMap { $0 }
             .removeDuplicates()
@@ -142,13 +194,15 @@ final class AppModel: ObservableObject {
             }
         }
 
-        callKit.onEnd = { [weak self] callID in
+        callKit.onEnd = { [weak self] callID, type in
             Task { @MainActor in
                 guard let self else { return }
-                if self.activeVideoCall?.callId == callID {
-                    await self.finishVideoCall()
-                } else {
+                if type == .sipAudio {
                     self.sipEngine.endCall()
+                } else if self.api.incomingVideoCall?.id == callID {
+                    await self.rejectIncomingVideoCall()
+                } else if self.activeVideoCall?.callId == callID {
+                    await self.finishVideoCall()
                 }
             }
         }

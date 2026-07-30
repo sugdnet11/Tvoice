@@ -114,4 +114,9 @@ final class RtpCodecTests: XCTestCase {
         let decoded = RtpCodecs.mulawToLinear(encoded)
         XCTAssertTrue(decoded > 0, "Max positive should decode to positive value")
     }
+
+    func testMinimumPcmValueDoesNotOverflow() {
+        _ = RtpCodecs.linearToAlaw(Int16.min)
+        _ = RtpCodecs.linearToMulaw(Int16.min)
+    }
 }

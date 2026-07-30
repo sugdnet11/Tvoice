@@ -13,6 +13,8 @@ generated artifacts with the Android app in the repository root.
 - WSS live chat and incoming video-call signalling;
 - LiveKit Swift 2.15.3 video, microphone/camera controls and call timer;
 - incoming/outgoing CallKit integration;
+- native FreePBX SIP over UDP with Digest authentication;
+- symmetric RTP on a dynamically bound port with PCMA/PCMU duplex audio;
 - PushKit token registration scaffold;
 - four tabs: Contacts, Calls, Chats and Account;
 - message composer follows the iOS keyboard through `safeAreaInset`.
@@ -64,11 +66,14 @@ PushKit device token and sends a short-expiry VoIP push for
 
 ## Current limitation
 
-The native iOS SIP/RTP audio engine is not yet implemented. The audio-call
-button is intentionally marked as pending instead of silently routing a PBX
-number through the cellular Phone app. A production iOS SIP implementation also
-needs PushKit/APNs for incoming calls in the background; permanently keeping the
-Android-style UDP service alive is not allowed by iOS.
+Foreground SIP audio calls are implemented. Background and terminated-state
+incoming SIP calls still require PushKit/APNs; permanently keeping the
+Android-style UDP service alive is not allowed by iOS. FreePBX must keep
+`rtp_symmetric`, `force_rport` and `rewrite_contact` enabled for mobile clients.
+
+SIP signalling is sent to `185.177.2.115:5060/UDP`. RTP never uses port 5060:
+the client binds a dynamic local socket and takes the remote media address and
+port strictly from the peer SDP `c=` and `m=audio` lines.
 
 Chat and LiveKit video use the already deployed Tvoice Chat 0.4.0 and LiveKit
 servers without changes.

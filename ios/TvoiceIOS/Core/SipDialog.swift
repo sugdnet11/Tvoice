@@ -56,27 +56,33 @@ struct SdpOfferAnswer {
     static func parse(_ sdp: String) -> SdpOfferAnswer? {
         var host: String?
         var port: UInt16?
-        var payload: UInt8 = 8 // Default PCMA
+        var payload: UInt8?
+        var insideAudioSection = false
         
         let lines = sdp.components(separatedBy: CharacterSet.newlines)
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.starts(with: "c=IN IP4 ") {
-                host = trimmed.replacingOccurrences(of: "c=IN IP4 ", with: "").trimmingCharacters(in: .whitespaces)
-            } else if trimmed.starts(with: "m=audio ") {
-                let parts = trimmed.components(separatedBy: " ")
-                if parts.count >= 2, let parsedPort = UInt16(parts[1]) {
+            if trimmed.starts(with: "m=") {
+                insideAudioSection = trimmed.starts(with: "m=audio ")
+                if insideAudioSection {
+                    let parts = trimmed.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+                    guard parts.count >= 4,
+                          let parsedPort = UInt16(parts[1]),
+                          parsedPort > 0,
+                          parsedPort != AppConfig.sipPort else { return nil }
                     port = parsedPort
+                    payload = parts.dropFirst(3).compactMap { UInt8($0) }.first(where: { $0 == 8 || $0 == 0 })
                 }
-                if parts.count >= 4 {
-                    if parts.contains("0") { payload = 0 }
-                    else if parts.contains("8") { payload = 8 }
-                }
+            } else if trimmed.starts(with: "c=IN IP4 "), host == nil || insideAudioSection {
+                host = trimmed.replacingOccurrences(of: "c=IN IP4 ", with: "").trimmingCharacters(in: .whitespaces)
             }
         }
         
-        guard let h = host, let p = port else { return nil }
-        return SdpOfferAnswer(mediaHost: h, mediaPort: p, selectedCodecPayload: payload)
+        guard let h = host,
+              h != "0.0.0.0",
+              let p = port,
+              let selectedPayload = payload else { return nil }
+        return SdpOfferAnswer(mediaHost: h, mediaPort: p, selectedCodecPayload: selectedPayload)
     }
 }
 
@@ -97,7 +103,12 @@ final class SipDialog {
     var connected: Bool = false
     var accepted: Bool = false
     
-    init(direction: Direction, peerNumber: String, callID: String = UUID().uuidString, localTag: String = String(UUID().uuidString.prefix(8))) {
+    init(
+        direction: Direction,
+        peerNumber: String,
+        callID: String = "\(UUID().uuidString)@\(AppConfig.sipHost)",
+        localTag: String = String(UUID().uuidString.prefix(8))
+    ) {
         self.direction = direction
         self.peerNumber = peerNumber
         self.callID = callID
@@ -108,5 +119,39 @@ final class SipDialog {
         self.requestURI = "sip:\(peerNumber)@\(AppConfig.sipHost)"
         self.remoteTarget = "sip:\(peerNumber)@\(AppConfig.sipHost)"
         self.routeSet = []
+    }
+
+    func update(fromInviteResponse message: SipMessage) {
+        remoteTag = Self.parameter(named: "tag", in: message.header("To")) ?? remoteTag
+        remoteTarget = Self.uri(in: message.header("Contact")) ?? remoteTarget
+        connected = message.statusCode == 200
+    }
+
+    static func incoming(peerNumber: String, request: SipMessage) -> SipDialog? {
+        guard let callID = request.header("Call-ID") else { return nil }
+        let dialog = SipDialog(direction: .incoming, peerNumber: peerNumber, callID: callID)
+        dialog.remoteTag = parameter(named: "tag", in: request.header("From"))
+        dialog.remoteTarget = uri(in: request.header("Contact")) ?? dialog.remoteTarget
+        dialog.requestURI = request.startLine.split(separator: " ").dropFirst().first.map(String.init) ?? dialog.requestURI
+        if let cseq = request.header("CSeq")?.split(separator: " ").first.flatMap({ Int($0) }) {
+            dialog.remoteCSeq = cseq
+        }
+        return dialog
+    }
+
+    static func uri(in header: String?) -> String? {
+        guard let header else { return nil }
+        if let left = header.firstIndex(of: "<"),
+           let right = header[left...].firstIndex(of: ">") {
+            return String(header[header.index(after: left)..<right])
+        }
+        return header.split(separator: ";", maxSplits: 1).first.map(String.init)
+    }
+
+    static func parameter(named name: String, in header: String?) -> String? {
+        guard let header else { return nil }
+        let marker = ";\(name)="
+        guard let range = header.range(of: marker, options: .caseInsensitive) else { return nil }
+        return String(header[range.upperBound...].prefix { $0 != ";" && !$0.isWhitespace })
     }
 }

@@ -2,14 +2,14 @@ import Foundation
 import CallKit
 import AVFoundation
 
-enum CallType {
+enum CallType: Equatable {
     case sipAudio
     case liveKitVideo
 }
 
 final class CallKitManager: NSObject, CXProviderDelegate {
     var onAnswer: ((String, CallType) -> Void)?
-    var onEnd: ((String) -> Void)?
+    var onEnd: ((String, CallType) -> Void)?
     var onAudioActivated: (() -> Void)?
 
     private let provider: CXProvider
@@ -53,6 +53,11 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         provider.reportOutgoingCall(with: entry.uuid, connectedAt: Date())
     }
 
+    func answer(callID: String) {
+        guard let entry = ids[callID] else { return }
+        controller.request(CXTransaction(action: CXAnswerCallAction(call: entry.uuid))) { _ in }
+    }
+
     func end(callID: String) {
         guard let entry = ids.removeValue(forKey: callID) else { return }
         controller.request(CXTransaction(action: CXEndCallAction(call: entry.uuid))) { _ in }
@@ -68,12 +73,12 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
-        guard let (callID, _) = callInfo(for: action.callUUID) else {
+        guard let (callID, type) = callInfo(for: action.callUUID) else {
             action.fulfill()
             return
         }
         ids.removeValue(forKey: callID)
-        onEnd?(callID)
+        onEnd?(callID, type)
         action.fulfill()
     }
 

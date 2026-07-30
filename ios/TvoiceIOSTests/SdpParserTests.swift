@@ -23,9 +23,7 @@ final class SdpParserTests: XCTestCase {
 
         XCTAssertEqual(offer.mediaHost, "185.177.2.115")
         XCTAssertEqual(offer.mediaPort, 15502)
-        // Both 8 and 0 are present; 0 appears after 8 so parser picks payload 0 (PCMU)
-        // since the parser checks if parts.contains("0") first
-        XCTAssertTrue(offer.selectedCodecPayload == 0 || offer.selectedCodecPayload == 8)
+        XCTAssertEqual(offer.selectedCodecPayload, 8, "The first supported codec in m=audio must win")
     }
 
     func testParseSdpWithOnlyPCMA() {
@@ -82,5 +80,25 @@ final class SdpParserTests: XCTestCase {
 
     func testParseSdpEmptyInput() {
         XCTAssertNil(SdpOfferAnswer.parse(""), "Should return nil for empty input")
+    }
+
+    func testRejectsSipPortAsRtpPort() {
+        let sdp = """
+        v=0\r
+        c=IN IP4 185.177.2.115\r
+        m=audio 5060 RTP/AVP 8 0\r
+        """
+
+        XCTAssertNil(SdpOfferAnswer.parse(sdp), "RTP must never be routed to SIP port 5060")
+    }
+
+    func testRejectsDisabledMedia() {
+        let sdp = """
+        v=0\r
+        c=IN IP4 185.177.2.115\r
+        m=audio 0 RTP/AVP 8\r
+        """
+
+        XCTAssertNil(SdpOfferAnswer.parse(sdp))
     }
 }

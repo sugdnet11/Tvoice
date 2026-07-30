@@ -12,6 +12,10 @@ AppModel ────────────── CallKitManager / PushKitMana
     │
     ├── LiveKitCallModel ── WebRTC ── LiveKit 1.13.1
     │
+    ├── NativeSipEngine ── SIP/UDP ── FreePBX
+    │          │
+    │          └── RtpAudioEngine ── dynamic RTP/PCMA/PCMU
+    │
     └── KeychainStore
 ```
 
@@ -24,4 +28,6 @@ Rules:
   ten-minute token.
 - CallKit owns system call presentation. PushKit only wakes the app and must
   immediately lead to a CallKit report.
+- SIP signalling and RTP media use separate UDP sockets and ports. RTP endpoints
+  are accepted only from negotiated SDP and port 5060 is explicitly rejected.
 - Android and iOS remain separate build targets but share the same public API.

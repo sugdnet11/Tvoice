@@ -44,8 +44,7 @@ struct AudioCallView: View {
                     HStack(spacing: 48) {
                         // Reject / Decline Button
                         Button {
-                            model.sipEngine.rejectCall()
-                            model.activeAudioCallPeer = nil
+                            model.rejectIncomingAudioCall()
                         } label: {
                             VStack(spacing: 6) {
                                 Circle()
@@ -64,7 +63,7 @@ struct AudioCallView: View {
 
                         // Accept Button
                         Button {
-                            model.sipEngine.acceptCall()
+                            model.answerIncomingAudioCall()
                         } label: {
                             VStack(spacing: 6) {
                                 Circle()
@@ -108,8 +107,7 @@ struct AudioCallView: View {
                         // Hangup Button
                         Button {
                             timer?.invalidate()
-                            model.sipEngine.endCall()
-                            model.activeAudioCallPeer = nil
+                            model.finishAudioCall()
                         } label: {
                             VStack(spacing: 6) {
                                 Circle()
