@@ -72,13 +72,19 @@ struct SplashScreenView: View {
         ZStack {
             Color(uiColor: .systemBackground).ignoresSafeArea()
             VStack(spacing: 0) {
-                // Partner logo (logonew.svg) at the top
-                Image("logonew")
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(height: 54)
-                    .padding(.top, 40)
-                    .padding(.horizontal, 32)
+                // Partner logo (logonew.svg) and TOJIKTELECOM name at the top
+                HStack(spacing: 12) {
+                    Image("logonew")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(height: 48)
+
+                    Text("TOJIKTELECOM")
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color(red: 0.85, green: 0.1, blue: 0.15)) // Partner brand red color matching logo
+                }
+                .padding(.top, 44)
+                .padding(.horizontal, 24)
                 
                 Spacer()
                 
