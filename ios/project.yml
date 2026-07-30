@@ -16,6 +16,10 @@ targets:
       - path: TvoiceIOS
     info:
       path: TvoiceIOS/Info.plist
+      properties:
+        UILaunchStoryboardName: LaunchScreen
+        NSCameraUsageDescription: "Приложению Tvoice необходим доступ к камере для видеозвонков."
+        NSMicrophoneUsageDescription: "Приложению Tvoice необходим доступ к микрофону для аудио- и видеозвонков."
     entitlements:
       path: TvoiceIOS/TvoiceIOS.entitlements
     dependencies:
@@ -29,7 +33,10 @@ targets:
         SWIFT_VERSION: 5.10
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: ""
+        DEVELOPMENT_TEAM: "2N57GJQ6KC"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
         SUPPORTS_MACCATALYST: NO
         GENERATE_INFOPLIST_FILE: NO
 schemes:

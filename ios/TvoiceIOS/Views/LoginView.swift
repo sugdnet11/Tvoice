@@ -11,7 +11,7 @@ struct LoginView: View {
                 Spacer()
                 Image(systemName: "waveform.circle.fill")
                     .font(.system(size: 76))
-                    .foregroundStyle(.tvoiceBlue)
+                    .foregroundStyle(Color.tvoiceBlue)
                 Text("Tvoice")
                     .font(.largeTitle.bold())
                 Text("Один логин для FreePBX, чата и видеозвонков")

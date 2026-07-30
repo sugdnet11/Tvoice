@@ -63,6 +63,21 @@ struct VideoCallCredentials: Decodable, Identifiable, Sendable {
     var id: String { callId }
 }
 
+enum CallDirection: String, Codable, Sendable {
+    case incoming
+    case outgoing
+    case missed
+}
+
+struct CallRecord: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    let peerNumber: String
+    let peerName: String
+    let direction: CallDirection
+    let timestamp: Date
+    let isVideo: Bool
+}
+
 struct StoredCredentials: Codable, Sendable {
     let sipNumber: String
     let password: String
@@ -83,6 +98,7 @@ enum APIError: LocalizedError {
             case "contact_not_found": return "Абонент не найден"
             case "video_unavailable": return "Сервер видеозвонков недоступен"
             case "call_not_found": return "Видеозвонок уже завершён"
+            case "cannot_call_yourself": return "Нельзя позвонить самому себе"
             default: return "Ошибка сервера \(status): \(code)"
             }
         case .notAuthenticated:

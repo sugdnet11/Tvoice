@@ -117,7 +117,6 @@ private struct VideoTrackView: UIViewRepresentable {
 
     func updateUIView(_ view: VideoView, context: Context) {
         view.track = track
-        view.isMirrored = mirror
     }
 }
 

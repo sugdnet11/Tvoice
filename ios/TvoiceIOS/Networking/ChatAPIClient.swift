@@ -46,6 +46,11 @@ final class ChatAPIClient: ObservableObject {
         return response.conversations
     }
 
+    func callLogs() async throws -> [CallRecord] {
+        let response: CallLogsResponse = try await request("/v1/calls/history")
+        return response.calls
+    }
+
     func ensureConversation(peer: String) async throws -> Conversation {
         let body = try JSONEncoder().encode(DirectRequest(peerSipNumber: peer))
         let response: ConversationResponse = try await request("/v1/conversations/direct", method: "POST", body: body)
@@ -74,6 +79,11 @@ final class ChatAPIClient: ObservableObject {
     func startVideoCall(peer: String) async throws -> VideoCallCredentials {
         let body = try JSONEncoder().encode(DirectRequest(peerSipNumber: peer))
         return try await request("/v1/video/calls", method: "POST", body: body)
+    }
+
+    func startAudioCall(peer: String) async throws -> VideoCallCredentials {
+        let body = try JSONEncoder().encode(DirectRequest(peerSipNumber: peer))
+        return try await request("/v1/video/calls?mode=audio", method: "POST", body: body)
     }
 
     func answerVideoCall(callID: String) async throws -> VideoCallCredentials {
@@ -221,6 +231,7 @@ private struct DirectRequest: Encodable { let peerSipNumber: String }
 private struct MessageRequest: Encodable { let body: String }
 private struct ContactsResponse: Decodable { let contacts: [Contact] }
 private struct ConversationsResponse: Decodable { let conversations: [Conversation] }
+private struct CallLogsResponse: Decodable { let calls: [CallRecord] }
 private struct ConversationResponse: Decodable { let conversation: Conversation }
 private struct MessagesResponse: Decodable { let messages: [ChatMessage] }
 private struct MessageResponse: Decodable { let message: ChatMessage }

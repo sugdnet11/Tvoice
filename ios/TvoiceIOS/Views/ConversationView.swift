@@ -38,7 +38,7 @@ struct ConversationView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
-                Button { model.errorMessage = "SIP-аудиодвижок iOS подключается на следующем этапе" } label: {
+                Button { Task { await model.startAudioCall(peer: peer.sipNumber) } } label: {
                     Image(systemName: "phone.fill")
                 }
                 Button { Task { await model.startVideoCall(peer: peer.sipNumber) } } label: {

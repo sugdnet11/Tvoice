@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import AVFoundation
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -8,13 +9,15 @@ final class AppModel: ObservableObject {
     @Published var isBusy = false
     @Published var errorMessage: String?
     @Published var activeVideoCall: VideoCallCredentials?
+    @Published var activeAudioCallPeer: String?
 
     let api: ChatAPIClient
     let callKit: CallKitManager
+    let sipEngine = NativeSipEngine()
     private var cancellables = Set<AnyCancellable>()
 
-    init(api: ChatAPIClient = ChatAPIClient(), callKit: CallKitManager = CallKitManager()) {
-        self.api = api
+    init(api: ChatAPIClient? = nil, callKit: CallKitManager = CallKitManager()) {
+        self.api = api ?? ChatAPIClient()
         self.callKit = callKit
         bindCalls()
     }
@@ -30,6 +33,8 @@ final class AppModel: ObservableObject {
                 password: credentials.password
             )
             user = response.user
+            AVAudioSession.sharedInstance().requestRecordPermission { _ in }
+            sipEngine.register(sipNumber: credentials.sipNumber, password: credentials.password)
         } catch {
             KeychainStore.clear()
             errorMessage = error.localizedDescription
@@ -48,6 +53,8 @@ final class AppModel: ObservableObject {
             let response = try await api.login(sipNumber: normalized, password: password)
             try KeychainStore.save(StoredCredentials(sipNumber: normalized, password: password))
             user = response.user
+            AVAudioSession.sharedInstance().requestRecordPermission { _ in }
+            sipEngine.register(sipNumber: normalized, password: password)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -56,17 +63,34 @@ final class AppModel: ObservableObject {
 
     func logout() {
         api.logout()
+        sipEngine.endCall()
         KeychainStore.clear()
         user = nil
         activeVideoCall = nil
+        activeAudioCallPeer = nil
     }
 
     func startVideoCall(peer: String) async {
         do {
+            LocalCallHistoryStore.saveCall(sipNumber: peer, displayName: peer, direction: "outgoing", isVideo: true)
             let credentials = try await api.startVideoCall(peer: peer)
             activeVideoCall = credentials
             callKit.reportOutgoing(callID: credentials.callId, peer: credentials.peer.displayName, video: true)
         } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func startAudioCall(peer: String) async {
+        do {
+            // Initiate direct FreePBX SIP UDP 5060 Audio Call
+            LocalCallHistoryStore.saveCall(sipNumber: peer, displayName: peer, direction: "outgoing", isVideo: false)
+            activeAudioCallPeer = peer
+            try await sipEngine.startAudioCall(peer: peer)
+            let callId = UUID().uuidString
+            callKit.reportOutgoing(callID: callId, peer: peer, video: false)
+        } catch {
+            activeAudioCallPeer = nil
             errorMessage = error.localizedDescription
         }
     }
