@@ -80,7 +80,8 @@ struct SplashScreenView: View {
                         .frame(height: 48)
 
                     Text("TOJIKTELECOM")
-                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                        .font(.system(size: 24, weight: .black, design: .default))
+                        .tracking(1.2)
                         .foregroundStyle(Color(red: 0.0, green: 156.0/255.0, blue: 241.0/255.0))
                 }
                 .padding(.top, 44)
