@@ -81,7 +81,7 @@ struct SplashScreenView: View {
 
                     Text("TOJIKTELECOM")
                         .font(.system(size: 22, weight: .bold, design: .rounded))
-                        .foregroundStyle(Color(red: 0.85, green: 0.1, blue: 0.15)) // Partner brand red color matching logo
+                        .foregroundStyle(Color(red: 0.0, green: 156.0/255.0, blue: 241.0/255.0))
                 }
                 .padding(.top, 44)
                 .padding(.horizontal, 24)
