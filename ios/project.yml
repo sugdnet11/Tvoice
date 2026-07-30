@@ -39,11 +39,29 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         SUPPORTS_MACCATALYST: NO
         GENERATE_INFOPLIST_FILE: NO
+  TvoiceIOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: TvoiceIOSTests
+    dependencies:
+      - target: TvoiceIOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tj.tvoice.ios.tests
+        SWIFT_VERSION: 5.10
+        DEVELOPMENT_TEAM: "2N57GJQ6KC"
+        CODE_SIGN_STYLE: Automatic
 schemes:
   TvoiceIOS:
     build:
       targets:
         TvoiceIOS: all
+        TvoiceIOSTests: [test]
+    test:
+      config: Debug
+      targets:
+        - name: TvoiceIOSTests
     run:
       config: Debug
     archive:
