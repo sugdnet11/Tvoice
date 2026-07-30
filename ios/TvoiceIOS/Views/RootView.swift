@@ -82,13 +82,23 @@ struct SplashScreenView: View {
                 
                 Spacer()
                 
-                // Main app icon (T icon) in the center with smooth rounded corners
-                Image("ticon")
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 140, height: 140)
-                    .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
-                    .shadow(color: Color.black.opacity(0.12), radius: 16, x: 0, y: 8)
+                // Main welcome title in the center
+                VStack(spacing: 8) {
+                    Text("Tvoice")
+                        .font(.system(size: 42, weight: .bold, design: .rounded))
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [Color.tvoiceNavy, Color.tvoiceBlue],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    
+                    Text("Добро пожаловать")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundStyle(Color.secondary)
+                }
+                .padding(.horizontal, 24)
                 
                 Spacer()
                 
