@@ -63,6 +63,7 @@ final class AppModel: ObservableObject {
 
     func logout() {
         api.logout()
+        sipEngine.unregister()
         sipEngine.endCall()
         KeychainStore.clear()
         user = nil
@@ -75,7 +76,7 @@ final class AppModel: ObservableObject {
             LocalCallHistoryStore.saveCall(sipNumber: peer, displayName: peer, direction: "outgoing", isVideo: true)
             let credentials = try await api.startVideoCall(peer: peer)
             activeVideoCall = credentials
-            callKit.reportOutgoing(callID: credentials.callId, peer: credentials.peer.displayName, video: true)
+            callKit.reportOutgoing(callID: credentials.callId, peer: credentials.peer.displayName, type: .liveKitVideo)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -83,12 +84,11 @@ final class AppModel: ObservableObject {
 
     func startAudioCall(peer: String) async {
         do {
-            // Initiate direct FreePBX SIP UDP 5060 Audio Call
             LocalCallHistoryStore.saveCall(sipNumber: peer, displayName: peer, direction: "outgoing", isVideo: false)
             activeAudioCallPeer = peer
             try await sipEngine.startAudioCall(peer: peer)
             let callId = UUID().uuidString
-            callKit.reportOutgoing(callID: callId, peer: peer, video: false)
+            callKit.reportOutgoing(callID: callId, peer: peer, type: .sipAudio)
         } catch {
             activeAudioCallPeer = nil
             errorMessage = error.localizedDescription
@@ -127,21 +127,28 @@ final class AppModel: ObservableObject {
                 self?.callKit.reportIncoming(
                     callID: invite.id,
                     peer: invite.peerName,
-                    video: true
+                    type: .liveKitVideo
                 )
             }
             .store(in: &cancellables)
 
-        callKit.onAnswer = { [weak self] _ in
-            Task { @MainActor in await self?.answerIncomingVideoCall() }
+        callKit.onAnswer = { [weak self] _, type in
+            Task { @MainActor in
+                if type == .sipAudio {
+                    self?.sipEngine.acceptCall()
+                } else {
+                    await self?.answerIncomingVideoCall()
+                }
+            }
         }
+
         callKit.onEnd = { [weak self] callID in
             Task { @MainActor in
                 guard let self else { return }
-                if self.api.incomingVideoCall?.id == callID {
-                    await self.rejectIncomingVideoCall()
-                } else if self.activeVideoCall?.callId == callID {
+                if self.activeVideoCall?.callId == callID {
                     await self.finishVideoCall()
+                } else {
+                    self.sipEngine.endCall()
                 }
             }
         }

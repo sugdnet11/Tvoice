@@ -1,14 +1,20 @@
-import AVFAudio
-import CallKit
 import Foundation
+import CallKit
+import AVFoundation
+
+enum CallType {
+    case sipAudio
+    case liveKitVideo
+}
 
 final class CallKitManager: NSObject, CXProviderDelegate {
-    var onAnswer: ((String) -> Void)?
+    var onAnswer: ((String, CallType) -> Void)?
     var onEnd: ((String) -> Void)?
+    var onAudioActivated: (() -> Void)?
 
     private let provider: CXProvider
     private let controller = CXCallController()
-    private var ids = [String: UUID]()
+    private var ids = [String: (uuid: UUID, type: CallType)]()
 
     override init() {
         let configuration = CXProviderConfiguration(localizedName: "Tvoice")
@@ -21,43 +27,48 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         provider.setDelegate(self, queue: nil)
     }
 
-    func reportIncoming(callID: String, peer: String, video: Bool) {
+    func reportIncoming(callID: String, peer: String, type: CallType) {
         let uuid = UUID()
-        ids[callID] = uuid
+        ids[callID] = (uuid: uuid, type: type)
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: peer)
         update.localizedCallerName = peer
-        update.hasVideo = video
+        update.hasVideo = (type == .liveKitVideo)
         provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in
             if error != nil { self?.ids.removeValue(forKey: callID) }
         }
     }
 
-    func reportOutgoing(callID: String, peer: String, video: Bool) {
+    func reportOutgoing(callID: String, peer: String, type: CallType) {
         let uuid = UUID()
-        ids[callID] = uuid
+        ids[callID] = (uuid: uuid, type: type)
         let handle = CXHandle(type: .generic, value: peer)
         let action = CXStartCallAction(call: uuid, handle: handle)
-        action.isVideo = video
+        action.isVideo = (type == .liveKitVideo)
         controller.request(CXTransaction(action: action)) { _ in }
     }
 
+    func reportConnected(callID: String) {
+        guard let entry = ids[callID] else { return }
+        provider.reportOutgoingCall(with: entry.uuid, connectedAt: Date())
+    }
+
     func end(callID: String) {
-        guard let uuid = ids.removeValue(forKey: callID) else { return }
-        controller.request(CXTransaction(action: CXEndCallAction(call: uuid))) { _ in }
+        guard let entry = ids.removeValue(forKey: callID) else { return }
+        controller.request(CXTransaction(action: CXEndCallAction(call: entry.uuid))) { _ in }
     }
 
     func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
-        guard let callID = callID(for: action.callUUID) else {
+        guard let (callID, type) = callInfo(for: action.callUUID) else {
             action.fail()
             return
         }
-        onAnswer?(callID)
+        onAnswer?(callID, type)
         action.fulfill()
     }
 
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
-        guard let callID = callID(for: action.callUUID) else {
+        guard let (callID, _) = callInfo(for: action.callUUID) else {
             action.fulfill()
             return
         }
@@ -72,7 +83,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
-        try? audioSession.setCategory(.playAndRecord, mode: .videoChat, options: [.allowBluetooth, .defaultToSpeaker])
+        try? audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .defaultToSpeaker])
+        onAudioActivated?()
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {}
@@ -81,7 +93,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         ids.removeAll()
     }
 
-    private func callID(for uuid: UUID) -> String? {
-        ids.first(where: { $0.value == uuid })?.key
+    private func callInfo(for uuid: UUID) -> (callID: String, type: CallType)? {
+        guard let match = ids.first(where: { $0.value.uuid == uuid }) else { return nil }
+        return (callID: match.key, type: match.value.type)
     }
 }

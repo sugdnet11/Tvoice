@@ -88,6 +88,7 @@ struct AudioCallView: View {
                         // Mute Button
                         Button {
                             isMuted.toggle()
+                            model.sipEngine.setMuted(isMuted)
                         } label: {
                             VStack(spacing: 6) {
                                 Circle()
