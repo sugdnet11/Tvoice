@@ -5,7 +5,9 @@ struct AudioCallView: View {
     let peer: String
     @State private var elapsed = 0
     @State private var isMuted = false
-    @State private var isSpeaker = true
+    @State private var isSpeaker = false
+    @State private var conferenceRoom = ""
+    @State private var showingConference = false
     @State private var timer: Timer?
 
     var body: some View {
@@ -83,6 +85,7 @@ struct AudioCallView: View {
                     .padding(.bottom, 48)
                 } else {
                     // Active call controls: Mute, End, Loudspeaker
+                    VStack(spacing: 22) {
                     HStack(spacing: 28) {
                         // Mute Button
                         Button {
@@ -145,6 +148,44 @@ struct AudioCallView: View {
                             }
                         }
                     }
+                    HStack(spacing: 28) {
+                        Button {
+                            model.toggleAudioHold()
+                        } label: {
+                            VStack(spacing: 6) {
+                                Circle()
+                                    .fill(model.sipEngine.isCallHeld ? Color.white : Color.white.opacity(0.18))
+                                    .frame(width: 60, height: 60)
+                                    .overlay(
+                                        Image(systemName: model.sipEngine.isCallHeld ? "play.fill" : "pause.fill")
+                                            .font(.title2)
+                                            .foregroundStyle(model.sipEngine.isCallHeld ? Color.tvoiceNavy : Color.white)
+                                    )
+                                Text(model.sipEngine.isCallHeld ? "Вернуть" : "Удержать")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.8))
+                            }
+                        }
+
+                        Button {
+                            showingConference = true
+                        } label: {
+                            VStack(spacing: 6) {
+                                Circle()
+                                    .fill(Color.white.opacity(0.18))
+                                    .frame(width: 60, height: 60)
+                                    .overlay(
+                                        Image(systemName: "person.3.fill")
+                                            .font(.title2)
+                                            .foregroundStyle(.white)
+                                    )
+                                Text("Конференция")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.8))
+                            }
+                        }
+                    }
+                    }
                     .padding(.bottom, 48)
                 }
             }
@@ -160,6 +201,18 @@ struct AudioCallView: View {
         }
         .onDisappear {
             timer?.invalidate()
+        }
+        .alert("Конференция", isPresented: $showingConference) {
+            TextField("Номер комнаты", text: $conferenceRoom)
+                .keyboardType(.phonePad)
+            Button("Подключить") {
+                let room = conferenceRoom
+                conferenceRoom = ""
+                Task { await model.startAudioConference(room: room) }
+            }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Введите номер конференц-комнаты FreePBX.")
         }
     }
 

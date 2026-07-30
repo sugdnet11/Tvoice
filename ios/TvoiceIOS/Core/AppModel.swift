@@ -98,10 +98,9 @@ final class AppModel: ObservableObject {
     }
 
     func answerIncomingAudioCall() {
+        sipEngine.acceptCall()
         if let callID = sipCallKitID {
-            callKit.answer(callID: callID)
-        } else {
-            sipEngine.acceptCall()
+            callKit.reportConnected(callID: callID)
         }
     }
 
@@ -116,6 +115,21 @@ final class AppModel: ObservableObject {
         sipEngine.endCall()
         if let callID = sipCallKitID {
             callKit.end(callID: callID)
+        }
+    }
+
+    func toggleAudioHold() {
+        sipEngine.toggleHold()
+    }
+
+    func startAudioConference(room: String) async {
+        do {
+            try await sipEngine.moveCurrentCallToConference(room: room)
+            let callId = sipEngine.currentCallID ?? UUID().uuidString
+            sipCallKitID = callId
+            callKit.reportOutgoing(callID: callId, peer: room, type: .sipAudio)
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 

@@ -6,6 +6,7 @@ import AVFoundation
 final class NativeSipEngine: ObservableObject {
     @Published private(set) var isRegistered = false
     @Published private(set) var currentCallID: String?
+    @Published private(set) var isCallHeld = false
     @Published private(set) var callState: SipCallState = .idle {
         didSet {
             objectWillChange.send()
@@ -32,6 +33,7 @@ final class NativeSipEngine: ObservableObject {
     private var currentCallPeer: String = ""
     private var activeDialog: SipDialog?
     private var rtpAudioEngine: RtpAudioEngine?
+    private var pendingHold: Bool?
     
     func register(sipNumber: String, password: String) {
         self.ownNumber = sipNumber
@@ -65,8 +67,8 @@ final class NativeSipEngine: ObservableObject {
                 continuation.resume()
             }
         }
-        try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
-        try audioSession.overrideOutputAudioPort(.speaker)
+        try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
+        try audioSession.overrideOutputAudioPort(.none)
         try audioSession.setActive(true)
         
         try sendSipInvite(to: peer, dialog: dialog)
@@ -115,24 +117,14 @@ final class NativeSipEngine: ObservableObject {
         if let invite = incomingInviteMessage {
             sendIncomingInviteReject(request: invite)
         }
-        stopRingbackTone()
-        rtpAudioEngine?.stop()
-        rtpAudioEngine = nil
-        self.activeDialog = nil
-        self.currentCallID = nil
-        self.callState = .idle
-        self.incomingInviteMessage = nil
+        resetCurrentCall()
     }
     
     func toggleSpeaker(enabled: Bool) {
-        let audioSession = AVAudioSession.sharedInstance()
-        try? audioSession.overrideOutputAudioPort(enabled ? .speaker : .none)
+        rtpAudioEngine?.setSpeaker(enabled)
     }
 
     func endCall() {
-        stopRingbackTone()
-        rtpAudioEngine?.stop()
-        rtpAudioEngine = nil
         if case .incoming = callState {
             rejectCall()
             return
@@ -144,10 +136,42 @@ final class NativeSipEngine: ObservableObject {
                 sendSipBye(dialog: dialog)
             }
         }
-        self.activeDialog = nil
-        self.currentCallID = nil
-        self.callState = .idle
-        self.incomingInviteMessage = nil
+        resetCurrentCall()
+    }
+
+    func toggleHold() {
+        guard case .connected = callState, let dialog = activeDialog, pendingHold == nil else { return }
+        let target = !isCallHeld
+        pendingHold = target
+        dialog.localCSeq += 1
+        dialog.viaBranch = "z9hG4bK-\(UUID().uuidString)"
+        sendReinvite(dialog: dialog, hold: target)
+    }
+
+    func moveCurrentCallToConference(room: String) async throws {
+        let normalized = room.filter { $0.isNumber || "*#+".contains($0) }
+        guard !normalized.isEmpty else { return }
+        guard case .connected = callState, let dialog = activeDialog else {
+            throw RtpAudioEngine.MediaError.invalidRemoteEndpoint("conference", 0)
+        }
+        sendSipRefer(dialog: dialog, target: normalized)
+        endCall()
+        try await Task.sleep(nanoseconds: 350_000_000)
+        try await startAudioCall(peer: normalized)
+    }
+
+    private func resetCurrentCall() {
+        stopRingbackTone()
+        rtpAudioEngine?.stop()
+        rtpAudioEngine = nil
+        activeDialog = nil
+        currentCallID = nil
+        incomingInviteMessage = nil
+        currentCallPeer = ""
+        pendingHold = nil
+        isCallHeld = false
+        callState = .idle
+        try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.none)
         try? AVAudioSession.sharedInstance().setActive(false)
     }
     
@@ -263,6 +287,7 @@ final class NativeSipEngine: ObservableObject {
         
         // Parse rport received IP mapping from FreePBX Via header if present
         let lines = message.components(separatedBy: "\r\n")
+        let cseqMethod = Self.cseqMethod(in: lines)
         if let viaLine = lines.first(where: { $0.lowercased().starts(with: "via:") }) {
             let pattern = try? NSRegularExpression(pattern: "received=([^;\\s]+)")
             let nsLine = viaLine as NSString
@@ -314,6 +339,24 @@ final class NativeSipEngine: ObservableObject {
 
         if message.starts(with: "INVITE sip:") {
             // Incoming Call from FreePBX! Extract Caller SIP number
+            guard let parsedRequest = SipMessage.parse(message),
+                  let dialog = SipDialog.incoming(peerNumber: "", request: parsedRequest) else {
+                sendIncomingInviteNotAcceptable(request: message)
+                return
+            }
+            if let activeDialog, activeDialog.callID == dialog.callID {
+                incomingInviteMessage = message
+                if activeDialog.connected, activeDialog.accepted {
+                    resendIncomingInviteOk(request: message)
+                } else {
+                    sendIncomingInviteRinging(request: message)
+                }
+                return
+            }
+            if activeDialog != nil || rtpAudioEngine != nil {
+                sendIncomingInviteReject(request: message)
+                return
+            }
             let lines = message.components(separatedBy: "\r\n")
             var callerNumber = "Неизвестный"
             if let fromLine = lines.first(where: { $0.lowercased().starts(with: "from:") }) {
@@ -323,12 +366,7 @@ final class NativeSipEngine: ObservableObject {
             }
             self.incomingInviteMessage = message
             self.currentCallPeer = callerNumber
-            guard let parsedRequest = SipMessage.parse(message),
-                  let dialog = SipDialog.incoming(peerNumber: callerNumber, request: parsedRequest) else {
-                sendIncomingInviteNotAcceptable(request: message)
-                return
-            }
-            self.activeDialog = dialog
+            self.activeDialog = SipDialog.incoming(peerNumber: callerNumber, request: parsedRequest)
             self.currentCallID = dialog.callID
             self.callState = .incoming(peer: callerNumber)
             
@@ -339,18 +377,11 @@ final class NativeSipEngine: ObservableObject {
 
         if message.starts(with: "BYE sip:") || message.starts(with: "CANCEL sip:") {
             sendRequestOk(request: message)
-            stopRingbackTone()
-            rtpAudioEngine?.stop()
-            rtpAudioEngine = nil
-            self.callState = .idle
-            self.incomingInviteMessage = nil
-            self.activeDialog = nil
-            self.currentCallID = nil
+            resetCurrentCall()
             return
         }
 
-        if (message.contains("SIP/2.0 401 Unauthorized") || message.contains("SIP/2.0 407 Proxy Authentication Required")) && message.contains("INVITE") {
-            let lines = message.components(separatedBy: "\r\n")
+        if (message.contains("SIP/2.0 401 Unauthorized") || message.contains("SIP/2.0 407 Proxy Authentication Required")) && cseqMethod == "INVITE" {
             if case let .calling(peer) = callState,
                let dialog = activeDialog,
                let authLine = lines.first(where: { $0.lowercased().starts(with: "www-authenticate:") || $0.lowercased().starts(with: "proxy-authenticate:") }),
@@ -358,6 +389,9 @@ final class NativeSipEngine: ObservableObject {
                 sendInviteChallengeAck(response: message, dialog: dialog)
                 dialog.localCSeq += 1
                 dialog.viaBranch = "z9hG4bK-\(UUID().uuidString)"
+                let authHeaderName = message.contains("SIP/2.0 407 Proxy Authentication Required")
+                    ? "Proxy-Authorization"
+                    : "Authorization"
                 let authHeader = DigestAuth.create(
                     challenge: challenge,
                     username: ownNumber,
@@ -366,17 +400,25 @@ final class NativeSipEngine: ObservableObject {
                     uri: "sip:\(peer)@\(AppConfig.sipHost)",
                     nonceCount: 1
                 )
-                sendAuthenticatedInvite(to: peer, authHeader: authHeader, dialog: dialog)
+                sendAuthenticatedInvite(
+                    to: peer,
+                    authHeaderName: authHeaderName,
+                    authHeader: authHeader,
+                    dialog: dialog
+                )
             }
             return
         }
 
-        if (message.contains("SIP/2.0 401 Unauthorized") || message.contains("SIP/2.0 407 Proxy Authentication Required")) && message.contains("REGISTER") {
+        if (message.contains("SIP/2.0 401 Unauthorized") || message.contains("SIP/2.0 407 Proxy Authentication Required")) && cseqMethod == "REGISTER" {
             // FreePBX challenged registration! Extract WWW-Authenticate header and reply with Digest MD5 Hash
             if let authLine = lines.first(where: { $0.lowercased().starts(with: "www-authenticate:") || $0.lowercased().starts(with: "proxy-authenticate:") }),
                let challenge = DigestChallenge.parse(authLine) {
                 cseq += 1
                 nonceCount += 1
+                let authHeaderName = message.contains("SIP/2.0 407 Proxy Authentication Required")
+                    ? "Proxy-Authorization"
+                    : "Authorization"
                 let authHeader = DigestAuth.create(
                     challenge: challenge,
                     username: ownNumber,
@@ -385,17 +427,17 @@ final class NativeSipEngine: ObservableObject {
                     uri: "sip:\(AppConfig.sipHost):5060",
                     nonceCount: nonceCount
                 )
-                sendAuthenticatedRegister(authHeader: authHeader)
+                sendAuthenticatedRegister(authHeaderName: authHeaderName, authHeader: authHeader)
             }
-        } else if message.contains("SIP/2.0 200 OK") && message.contains("REGISTER") {
+        } else if message.contains("SIP/2.0 200 OK") && cseqMethod == "REGISTER" {
             isRegistered = true
             print("Successfully registered on FreePBX as Available:", ownNumber)
-        } else if message.contains("SIP/2.0 180 Ringing") {
+        } else if message.contains("SIP/2.0 180 Ringing") && cseqMethod == "INVITE" {
             // FreePBX confirmed recipient device is ringing!
             if case let .calling(peer) = callState {
                 playRingbackTone()
             }
-        } else if message.contains("SIP/2.0 200 OK") && (message.contains("INVITE") || message.contains("CSeq:") && message.contains("INVITE")) {
+        } else if message.contains("SIP/2.0 200 OK") && cseqMethod == "INVITE" {
             guard let response = SipMessage.parse(message),
                   let offer = SdpOfferAnswer.parse(response.body) else {
                 stopRingbackTone()
@@ -427,6 +469,11 @@ final class NativeSipEngine: ObservableObject {
                 )
                 let localHost = localSdpAddress()?.host ?? "unknown"
                 printMediaRoute(localHost: localHost, localPort: rtpEngine.localPort, offer: offer)
+                if let hold = pendingHold {
+                    isCallHeld = hold
+                    rtpEngine.setHeld(hold)
+                    pendingHold = nil
+                }
                 activeDialog?.connected = true
                 self.callState = .connected(peer: peerToConnect)
             } catch {
@@ -434,15 +481,24 @@ final class NativeSipEngine: ObservableObject {
                 rtpAudioEngine = nil
                 self.callState = .failed(reason: error.localizedDescription)
             }
-        } else if message.contains("SIP/2.0 486 Busy") || message.contains("SIP/2.0 603 Decline") || message.contains("SIP/2.0 487 Request Terminated") {
+        } else if cseqMethod == "INVITE" && (message.contains("SIP/2.0 486 Busy") || message.contains("SIP/2.0 603 Decline") || message.contains("SIP/2.0 487 Request Terminated")) {
             stopRingbackTone()
-            rtpAudioEngine?.stop()
-            rtpAudioEngine = nil
+            resetCurrentCall()
             if case let .calling(peer) = callState {
                 LocalCallHistoryStore.saveCall(sipNumber: peer, displayName: peer, direction: "missed", isVideo: false)
             }
             self.callState = .failed(reason: "Занято или вызов отклонен")
         }
+    }
+
+    private static func cseqMethod(in lines: [String]) -> String? {
+        guard let cseq = lines.first(where: { $0.lowercased().starts(with: "cseq:") }) else {
+            return nil
+        }
+        return cseq
+            .split(separator: " ")
+            .last
+            .map { String($0).uppercased() }
     }
     
     private func contactUri() -> String {
@@ -526,7 +582,7 @@ final class NativeSipEngine: ObservableObject {
         send(data: Data(sipMessage.utf8))
     }
 
-    private func sendAuthenticatedRegister(authHeader: String) {
+    private func sendAuthenticatedRegister(authHeaderName: String, authHeader: String) {
         let sipMessage = """
         REGISTER sip:\(AppConfig.sipHost):5060 SIP/2.0\r
         \(viaHeader(branch: "z9hG4bK\(UUID().uuidString)"))\r
@@ -536,10 +592,11 @@ final class NativeSipEngine: ObservableObject {
         Call-ID: \(registerCallId)\r
         CSeq: \(cseq) REGISTER\r
         Contact: <\(contactUri())>;ob;expires=3600\r
-        Authorization: \(authHeader)\r
+        \(authHeaderName): \(authHeader)\r
         Expires: 3600\r
         User-Agent: Tvoice/1.0.0 TvoiceSipCore/1.8\r
         Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE\r
+        Supported: path, gruu, outbound\r
         Content-Length: 0\r
         \r
 
@@ -555,21 +612,7 @@ final class NativeSipEngine: ObservableObject {
         self.rtpAudioEngine = rtpEngine
         let boundPort = try rtpEngine.prepare()
         
-        let sdpBody = """
-        v=0\r
-        o=Tvoice \(Int(Date().timeIntervalSince1970)) 1 IN \(localAddress.network) \(localAddress.host)\r
-        s=Tvoice\r
-        c=IN \(localAddress.network) \(localAddress.host)\r
-        t=0 0\r
-        m=audio \(boundPort) RTP/AVP 8 0 101\r
-        a=rtpmap:8 PCMA/8000\r
-        a=rtpmap:0 PCMU/8000\r
-        a=rtpmap:101 telephone-event/8000\r
-        a=fmtp:101 0-16\r
-        a=ptime:20\r
-        a=sendrecv\r
-
-        """
+        let sdpBody = audioSdp(localAddress: localAddress, localRtpPort: boundPort, payloadType: nil, hold: false)
         let bodyData = Data(sdpBody.utf8)
         let sipInvite = """
         INVITE sip:\(peer)@\(AppConfig.sipHost) SIP/2.0\r
@@ -581,7 +624,8 @@ final class NativeSipEngine: ObservableObject {
         CSeq: \(dialog.localCSeq) INVITE\r
         Contact: <\(contactUri())>\r
         User-Agent: Tvoice/1.0.0 TvoiceSipCore/1.8\r
-        Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE\r
+        Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE, REFER\r
+        Supported: replaces, timer\r
         Content-Type: application/sdp\r
         Content-Length: \(bodyData.count)\r
         \r
@@ -590,28 +634,48 @@ final class NativeSipEngine: ObservableObject {
         send(data: Data(sipInvite.utf8))
     }
 
-    private func sendAuthenticatedInvite(to peer: String, authHeader: String, dialog: SipDialog) {
+    private func audioSdp(
+        localAddress: (network: String, host: String),
+        localRtpPort: UInt16,
+        payloadType: UInt8?,
+        hold: Bool
+    ) -> String {
+        let payloads = payloadType.map { "\($0) 101" } ?? "8 0 101"
+        let codecLines: String
+        if let payloadType {
+            codecLines = "a=rtpmap:\(payloadType) \(payloadType == 0 ? "PCMU/8000" : "PCMA/8000")\r\n"
+        } else {
+            codecLines = "a=rtpmap:8 PCMA/8000\r\na=rtpmap:0 PCMU/8000\r\n"
+        }
+        return """
+        v=0\r
+        o=Tvoice \(Int(Date().timeIntervalSince1970)) 1 IN \(localAddress.network) \(localAddress.host)\r
+        s=Tvoice\r
+        c=IN \(localAddress.network) \(localAddress.host)\r
+        t=0 0\r
+        m=audio \(localRtpPort) RTP/AVP \(payloads)\r
+        \(codecLines)\
+        a=rtpmap:101 telephone-event/8000\r
+        a=fmtp:101 0-16\r
+        a=ptime:20\r
+        \(hold ? "a=sendonly" : "a=sendrecv")\r
+
+        """
+    }
+
+    private func sendAuthenticatedInvite(
+        to peer: String,
+        authHeaderName: String,
+        authHeader: String,
+        dialog: SipDialog
+    ) {
         guard let localAddress = localSdpAddress(),
               let boundPort = rtpAudioEngine?.localPort,
               boundPort > 0 else {
             callState = .failed(reason: "Не удалось подготовить локальный RTP-порт")
             return
         }
-        let sdpBody = """
-        v=0\r
-        o=Tvoice \(Int(Date().timeIntervalSince1970)) 1 IN \(localAddress.network) \(localAddress.host)\r
-        s=Tvoice\r
-        c=IN \(localAddress.network) \(localAddress.host)\r
-        t=0 0\r
-        m=audio \(boundPort) RTP/AVP 8 0 101\r
-        a=rtpmap:8 PCMA/8000\r
-        a=rtpmap:0 PCMU/8000\r
-        a=rtpmap:101 telephone-event/8000\r
-        a=fmtp:101 0-16\r
-        a=ptime:20\r
-        a=sendrecv\r
-
-        """
+        let sdpBody = audioSdp(localAddress: localAddress, localRtpPort: boundPort, payloadType: nil, hold: false)
         let bodyData = Data(sdpBody.utf8)
         let sipInvite = """
         INVITE sip:\(peer)@\(AppConfig.sipHost) SIP/2.0\r
@@ -622,15 +686,69 @@ final class NativeSipEngine: ObservableObject {
         Call-ID: \(dialog.callID)\r
         CSeq: \(dialog.localCSeq) INVITE\r
         Contact: <\(contactUri())>\r
-        Authorization: \(authHeader)\r
+        \(authHeaderName): \(authHeader)\r
         User-Agent: Tvoice/1.0.0 TvoiceSipCore/1.8\r
-        Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE\r
+        Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE, REFER\r
+        Supported: replaces, timer\r
         Content-Type: application/sdp\r
         Content-Length: \(bodyData.count)\r
         \r
         \(sdpBody)
         """
         send(data: Data(sipInvite.utf8))
+    }
+
+    private func sendReinvite(dialog: SipDialog, hold: Bool) {
+        guard let localAddress = localSdpAddress(),
+              let localRtpPort = rtpAudioEngine?.localPort,
+              localRtpPort > 0 else {
+            pendingHold = nil
+            return
+        }
+        let sdpBody = audioSdp(localAddress: localAddress, localRtpPort: localRtpPort, payloadType: nil, hold: hold)
+        let bodyData = Data(sdpBody.utf8)
+        let remoteTagPart = dialog.remoteTag != nil ? ";tag=\(dialog.remoteTag!)" : ""
+        let reinvite = """
+        INVITE \(dialog.remoteTarget) SIP/2.0\r
+        \(viaHeader(branch: dialog.viaBranch))\r
+        Max-Forwards: 70\r
+        From: <sip:\(ownNumber)@\(AppConfig.sipHost)>;tag=\(dialog.localTag)\r
+        To: <sip:\(dialog.peerNumber)@\(AppConfig.sipHost)>\(remoteTagPart)\r
+        Call-ID: \(dialog.callID)\r
+        CSeq: \(dialog.localCSeq) INVITE\r
+        Contact: <\(contactUri())>\r
+        User-Agent: Tvoice/1.0.0 TvoiceSipCore/1.8\r
+        Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE, REFER\r
+        Supported: replaces, timer\r
+        Content-Type: application/sdp\r
+        Content-Length: \(bodyData.count)\r
+        \r
+        \(sdpBody)
+        """
+        send(data: Data(reinvite.utf8))
+    }
+
+    private func sendSipRefer(dialog: SipDialog, target: String) {
+        dialog.localCSeq += 1
+        dialog.viaBranch = "z9hG4bK-\(UUID().uuidString)"
+        let remoteTagPart = dialog.remoteTag != nil ? ";tag=\(dialog.remoteTag!)" : ""
+        let refer = """
+        REFER \(dialog.remoteTarget) SIP/2.0\r
+        \(viaHeader(branch: dialog.viaBranch))\r
+        Max-Forwards: 70\r
+        From: <sip:\(ownNumber)@\(AppConfig.sipHost)>;tag=\(dialog.localTag)\r
+        To: <sip:\(dialog.peerNumber)@\(AppConfig.sipHost)>\(remoteTagPart)\r
+        Call-ID: \(dialog.callID)\r
+        CSeq: \(dialog.localCSeq) REFER\r
+        Contact: <\(contactUri())>\r
+        Refer-To: <sip:\(target)@\(AppConfig.sipHost)>\r
+        Referred-By: <sip:\(ownNumber)@\(AppConfig.sipHost)>\r
+        User-Agent: Tvoice/1.0.0 TvoiceSipCore/1.8\r
+        Content-Length: 0\r
+        \r
+
+        """
+        send(data: Data(refer.utf8))
     }
 
     private func sendSipAck(response: String) {
@@ -735,6 +853,22 @@ final class NativeSipEngine: ObservableObject {
 
         """
         send(data: Data(sipResponse.utf8))
+    }
+
+    private func resendIncomingInviteOk(request: String) {
+        guard let offer = SdpOfferAnswer.parse(request),
+              let localAddress = localSdpAddress(),
+              let localRtpPort = rtpAudioEngine?.localPort,
+              localRtpPort > 0 else {
+            sendIncomingInviteNotAcceptable(request: request)
+            return
+        }
+        sendIncomingInviteOk(
+            request: request,
+            localAddress: localAddress,
+            localRtpPort: localRtpPort,
+            payloadType: offer.selectedCodecPayload
+        )
     }
 
     private func sendIncomingInviteOk(

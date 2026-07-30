@@ -25,6 +25,9 @@ final class RtpAudioEngine {
     private var audioEngine: AVAudioEngine?
     private var playerNode: AVAudioPlayerNode?
     private var isRunning = false
+    private var speakerEnabled = false
+    private var isRebuildingAudioGraph = false
+    private var notificationTokens = [NSObjectProtocol]()
     
     private var ssrc: UInt32 = UInt32.random(in: 1...UInt32.max)
     private var sequenceNumber: UInt16 = UInt16.random(in: 1...UInt16.max)
@@ -34,6 +37,7 @@ final class RtpAudioEngine {
     private var remoteEndpoint: InetSocketAddress?
     private var selectedPayloadType: UInt8 = 8 // PCMA by default
     private var isMuted = false
+    private var isHeld = false
     
     // AVAudioEngine reliably converts this 8 kHz mono Float32 stream to the
     // current hardware format. G.711 conversion still uses Int16 samples.
@@ -78,69 +82,12 @@ final class RtpAudioEngine {
         self.selectedPayloadType = payloadType
         self.remoteEndpoint = endpoint
 
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(
-            .playAndRecord,
-            mode: .voiceChat,
-            options: [.allowBluetoothHFP, .defaultToSpeaker]
-        )
-        try audioSession.setActive(true)
+        try configureAudioSession(speaker: speakerEnabled)
 
-        // Setup AVAudioEngine only after the remote RTP endpoint is known.
-        let engine = AVAudioEngine()
-        let player = AVAudioPlayerNode()
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: pcm8kFormat)
-        
-        // Setup capture from microphone inputNode
-        let inputNode = engine.inputNode
-        let nativeInputFormat = inputNode.outputFormat(forBus: 0)
-        
-        guard let captureConverter = AVAudioConverter(from: nativeInputFormat, to: pcm8kFormat) else {
-            throw MediaError.audioConverterUnavailable
-        }
-        
-        var sampleAccumulator = [Int16]()
-        
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: nativeInputFormat) { [weak self] buffer, _ in
-            guard let self = self, self.isRunning, !self.isMuted else { return }
-            
-            let frameCount = AVAudioFrameCount(ceil(Double(buffer.frameLength) * 8000.0 / buffer.format.sampleRate))
-            guard frameCount > 0, let pcmBuffer = AVAudioPCMBuffer(pcmFormat: self.pcm8kFormat, frameCapacity: frameCount) else { return }
-            
-            var error: NSError?
-            var suppliedInput = false
-            _ = captureConverter.convert(to: pcmBuffer, error: &error) { _, outStatus in
-                if suppliedInput {
-                    outStatus.pointee = .noDataNow
-                    return nil
-                }
-                suppliedInput = true
-                outStatus.pointee = .haveData
-                return buffer
-            }
-            
-            if error == nil, pcmBuffer.frameLength > 0, let channelData = pcmBuffer.floatChannelData?[0] {
-                let count = Int(pcmBuffer.frameLength)
-                for i in 0..<count {
-                    let scaled = max(-1.0, min(1.0, channelData[i])) * Float(Int16.max)
-                    sampleAccumulator.append(Int16(scaled))
-                    if sampleAccumulator.count >= 160 {
-                        let chunk = Array(sampleAccumulator.prefix(160))
-                        sampleAccumulator.removeFirst(160)
-                        self.sendRtpFrame(pcmSamples: chunk)
-                    }
-                }
-            }
-        }
-        
-        self.audioEngine = engine
-        self.playerNode = player
         self.isRunning = true
-
+        installAudioSessionObservers()
         do {
-            try engine.start()
-            player.play()
+            try rebuildAudioGraph()
         } catch {
             stop()
             throw error
@@ -157,7 +104,9 @@ final class RtpAudioEngine {
     
     func stop() {
         isRunning = false
+        isRebuildingAudioGraph = false
         remoteEndpoint = nil
+        audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
         playerNode?.stop()
@@ -165,10 +114,153 @@ final class RtpAudioEngine {
         rtpSocket?.closeSocket()
         rtpSocket = nil
         localPort = 0
+        removeAudioSessionObservers()
     }
     
     func setMuted(_ muted: Bool) {
         self.isMuted = muted
+    }
+
+    func setHeld(_ held: Bool) {
+        self.isHeld = held
+    }
+
+    func setSpeaker(_ enabled: Bool) {
+        do {
+            speakerEnabled = enabled
+            try configureAudioSession(speaker: enabled)
+            try rebuildAudioGraph()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                self?.restartAudioGraphIfNeeded()
+            }
+        } catch {
+            print("Failed to switch audio route:", error)
+        }
+    }
+
+    private func configureAudioSession(speaker: Bool) throws {
+        let audioSession = AVAudioSession.sharedInstance()
+        let options: AVAudioSession.CategoryOptions = speaker
+            ? [.allowBluetoothHFP, .defaultToSpeaker]
+            : [.allowBluetoothHFP]
+        try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: options)
+        try audioSession.setActive(true)
+        try audioSession.overrideOutputAudioPort(speaker ? .speaker : .none)
+    }
+
+    private func installAudioSessionObservers() {
+        guard notificationTokens.isEmpty else { return }
+        let center = NotificationCenter.default
+        notificationTokens.append(
+            center.addObserver(
+                forName: AVAudioSession.routeChangeNotification,
+                object: AVAudioSession.sharedInstance(),
+                queue: .main
+            ) { [weak self] _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    self?.restartAudioGraphIfNeeded()
+                }
+            }
+        )
+        notificationTokens.append(
+            center.addObserver(
+                forName: AVAudioSession.interruptionNotification,
+                object: AVAudioSession.sharedInstance(),
+                queue: .main
+            ) { [weak self] notification in
+                guard
+                    let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                    AVAudioSession.InterruptionType(rawValue: rawType) == .ended
+                else { return }
+                do {
+                    try self?.configureAudioSession(speaker: self?.speakerEnabled == true)
+                    try self?.rebuildAudioGraph()
+                } catch {
+                    print("Failed to resume audio session:", error)
+                }
+            }
+        )
+    }
+
+    private func removeAudioSessionObservers() {
+        let center = NotificationCenter.default
+        notificationTokens.forEach { center.removeObserver($0) }
+        notificationTokens.removeAll()
+    }
+
+    private func restartAudioGraphIfNeeded() {
+        guard isRunning else { return }
+        do {
+            if audioEngine?.isRunning != true || playerNode?.isPlaying != true {
+                try rebuildAudioGraph()
+            }
+        } catch {
+            print("Failed to restart audio graph:", error)
+        }
+    }
+
+    private func rebuildAudioGraph() throws {
+        guard isRunning, !isRebuildingAudioGraph else { return }
+        isRebuildingAudioGraph = true
+        defer { isRebuildingAudioGraph = false }
+
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        playerNode?.stop()
+
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: pcm8kFormat)
+
+        let inputNode = engine.inputNode
+        let nativeInputFormat = inputNode.outputFormat(forBus: 0)
+        guard let captureConverter = AVAudioConverter(from: nativeInputFormat, to: pcm8kFormat) else {
+            throw MediaError.audioConverterUnavailable
+        }
+
+        var sampleAccumulator = [Int16]()
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: nativeInputFormat) { [weak self] buffer, _ in
+            guard let self = self, self.isRunning else { return }
+
+            let frameCount = AVAudioFrameCount(ceil(Double(buffer.frameLength) * 8000.0 / buffer.format.sampleRate))
+            guard frameCount > 0,
+                  let pcmBuffer = AVAudioPCMBuffer(pcmFormat: self.pcm8kFormat, frameCapacity: frameCount) else { return }
+
+            var error: NSError?
+            var suppliedInput = false
+            _ = captureConverter.convert(to: pcmBuffer, error: &error) { _, outStatus in
+                if suppliedInput {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                suppliedInput = true
+                outStatus.pointee = .haveData
+                return buffer
+            }
+
+            guard error == nil,
+                  pcmBuffer.frameLength > 0,
+                  let channelData = pcmBuffer.floatChannelData?[0] else { return }
+
+            let count = Int(pcmBuffer.frameLength)
+            for i in 0..<count {
+                let scaled = max(-1.0, min(1.0, channelData[i])) * Float(Int16.max)
+                sampleAccumulator.append((self.isMuted || self.isHeld) ? 0 : Int16(scaled))
+                if sampleAccumulator.count >= 160 {
+                    let chunk = Array(sampleAccumulator.prefix(160))
+                    sampleAccumulator.removeFirst(160)
+                    self.sendRtpFrame(pcmSamples: chunk)
+                }
+            }
+        }
+
+        audioEngine = engine
+        playerNode = player
+        engine.prepare()
+        try engine.start()
+        player.play()
+        sendRtpFrame(pcmSamples: Array(repeating: 0, count: 160))
     }
     
     private func sendRtpFrame(pcmSamples: [Int16]) {
@@ -271,7 +363,7 @@ final class RtpAudioEngine {
             }
         }
         
-        if let player = playerNode {
+        if !isHeld, let player = playerNode {
             player.scheduleBuffer(pcmBuffer)
         }
     }
@@ -280,7 +372,7 @@ final class RtpAudioEngine {
 // Pure Swift G.711 PCMA / PCMU Codec implementation
 enum RtpCodecs {
     static func linearToAlaw(_ pcm: Int16) -> UInt8 {
-        var sample = Int32(pcm)
+        var sample = Int32(pcm) >> 3
         let mask: UInt8
         if sample >= 0 {
             mask = 0xD5
@@ -288,10 +380,14 @@ enum RtpCodecs {
             mask = 0x55
             sample = -sample - 1
         }
-        sample = min(sample, 32_635)
+        sample = min(sample, 4095)
         let segment = segmentIndex(sample)
-        var value = UInt8(segment << 4)
-        value |= UInt8((sample >> (segment < 2 ? 4 : segment + 3)) & 0x0F)
+        let value: UInt8
+        if segment < 2 {
+            value = UInt8((segment << 4) | Int((sample >> 1) & 0x0F))
+        } else {
+            value = UInt8((segment << 4) | Int((sample >> Int32(segment)) & 0x0F))
+        }
         return value ^ mask
     }
 
@@ -314,15 +410,20 @@ enum RtpCodecs {
         var sample = Int32(pcm)
         let mask: UInt8
         if sample < 0 {
-            sample = 0x84 - sample
+            sample = -sample
             mask = 0x7F
         } else {
-            sample += 0x84
             mask = 0xFF
         }
-        sample = min(sample, 32_635 + 0x84)
-        let segment = segmentIndex(sample)
-        let value = UInt8((segment << 4) | Int((sample >> (segment + 3)) & 0x0F))
+        sample = min(sample + 0x84, 32635)
+        var exponent = 7
+        var expMask: Int32 = 0x4000
+        while exponent > 0 && sample & expMask == 0 {
+            exponent -= 1
+            expMask >>= 1
+        }
+        let mantissa = (sample >> Int32(exponent + 3)) & 0x0F
+        let value = UInt8((exponent << 4) | Int(mantissa))
         return value ^ mask
     }
 
@@ -337,7 +438,7 @@ enum RtpCodecs {
     }
 
     private static func segmentIndex(_ sample: Int32) -> Int {
-        let segmentEnds: [Int32] = [0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF, 0x1FFF, 0x3FFF, 0x7FFF]
+        let segmentEnds: [Int32] = [31, 63, 127, 255, 511, 1023, 2047, 4095]
         return segmentEnds.firstIndex(where: { sample <= $0 }) ?? 7
     }
 }
