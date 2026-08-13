@@ -1,0 +1,36 @@
+name: Windows quality
+
+on:
+  pull_request:
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke-test:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Restore
+        run: dotnet restore windows/Tvoice.Windows.sln
+      - name: Build release
+        run: dotnet build windows/Tvoice.Windows.sln -c Release --no-restore
+      - name: Run smoke tests
+        run: dotnet run --project windows/Tvoice.Windows.SmokeTests/Tvoice.Windows.SmokeTests.csproj -c Release --no-build

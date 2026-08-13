@@ -14,6 +14,13 @@ server-backend/.tvoice-auth.key-transfer
 video-server/livekit-credentials.env
 *.apk
 .publish-worktree/
+.publish-three-platforms/
+**/bin/
+**/obj/
+**/.vs/
+**/artifacts/
+*.user
+signing/
 .DS_Store
 DerivedData/
 Pods/
