@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Tvoice.Splash" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">#F8FBFF</item>
+        <item name="android:statusBarColor">#F8FBFF</item>
+        <item name="android:navigationBarColor">#FAFCFF</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowSplashScreenBackground">#F8FBFF</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_tojiktelecom_mark</item>
+        <item name="android:windowSplashScreenAnimationDuration">200</item>
+    </style>
+</resources>

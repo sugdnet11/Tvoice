@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="tvoice_page">#0F172A</color>
+    <color name="tvoice_surface">#172033</color>
+    <color name="tvoice_blue">#3395FF</color>
+    <color name="tvoice_blue_pressed">#147CE5</color>
+    <color name="tvoice_blue_soft">#1E3557</color>
+    <color name="tvoice_text_primary">#F8FAFC</color>
+    <color name="tvoice_text_secondary">#94A3B8</color>
+    <color name="tvoice_icon_inactive">#94A3B8</color>
+    <color name="tvoice_divider">#263449</color>
+    <color name="tvoice_search">#1E293B</color>
+    <color name="tvoice_chat_background">#0F172A</color>
+    <color name="tvoice_incoming_bubble">#1E293B</color>
+    <color name="tvoice_outgoing_bubble">#147CE5</color>
+    <color name="tvoice_outgoing_text">#FFFFFF</color>
+    <color name="tvoice_cyan">#3395FF</color>
+    <color name="tvoice_green">#22C55E</color>
+    <color name="tvoice_red">#FF453A</color>
+    <color name="tvoice_video_overlay">#73000000</color>
+</resources>

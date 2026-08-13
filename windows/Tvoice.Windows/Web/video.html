@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Tvoice Video</title>
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.15.6/dist/livekit-client.umd.min.js"></script>
+  <style>
+    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#111;color:#fff;font-family:"Segoe UI Variable Text","Segoe UI",sans-serif}
+    #stage{position:relative;width:100%;height:100%;background:radial-gradient(circle at 50% 28%,#2d2d2d,#111 68%)}
+    #remote{width:100%;height:100%;object-fit:contain;background:#0b0b0b}
+    #empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:13px;color:#aaa}
+    #avatar{width:92px;height:92px;border-radius:28px;background:#0a84ff;display:flex;align-items:center;justify-content:center;font-size:38px;font-weight:650;color:#fff}
+    #top{position:absolute;left:0;right:0;top:0;padding:22px;text-align:center;background:linear-gradient(#111d,transparent);z-index:4;pointer-events:none}
+    #peer{font-size:21px;font-weight:650}#status{font-size:13px;color:#bbb;margin-top:5px}
+    #localWrap{position:absolute;right:16px;top:86px;width:138px;height:190px;border-radius:14px;overflow:hidden;background:#222;box-shadow:0 10px 35px #0008;border:1px solid #ffffff22;z-index:6;cursor:move;touch-action:none}
+    #local{width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
+    #controls{position:absolute;left:50%;bottom:24px;transform:translateX(-50%);display:flex;gap:10px;z-index:8;padding:10px 12px;border:1px solid #ffffff1c;border-radius:30px;background:#202020d9;backdrop-filter:blur(18px)}
+    button{width:48px;height:48px;border:1px solid #ddd;border-radius:24px;background:#fff;color:#222;font-size:19px;cursor:pointer;box-shadow:0 2px 10px #0004}
+    button:hover{filter:brightness(.9)}button.off{background:#4a4a4a;border-color:#4a4a4a;color:#fff}button.end{background:#ff453a;border-color:#ff453a;color:#fff;font-size:21px;width:58px}
+    #error{position:absolute;left:18px;right:18px;bottom:94px;padding:11px;border-radius:10px;background:#ff453acc;display:none;text-align:center;z-index:9;font-size:13px}
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <audio id="remoteAudio" autoplay></audio>
+    <video id="remote" autoplay playsinline></video>
+    <div id="empty"><div id="avatar">T</div><div>Ожидание видео собеседника…</div></div>
+    <div id="top"><div id="peer">Tvoice</div><div id="status">Подключение…</div></div>
+    <div id="localWrap"><video id="local" autoplay muted playsinline></video></div>
+    <div id="error"></div>
+    <div id="controls">
+      <button id="mic" title="Микрофон">🎤</button>
+      <button id="camera" title="Камера">📹</button>
+      <button id="switch" title="Переключить камеру">↻</button>
+      <button id="end" class="end" title="Завершить">●</button>
+    </div>
+  </div>
+  <script>
+    let room, micOn=true, cameraOn=true, cameraIndex=0;
+    const remote=document.getElementById('remote'), local=document.getElementById('local'), remoteAudio=document.getElementById('remoteAudio');
+    const empty=document.getElementById('empty'), status=document.getElementById('status'), error=document.getElementById('error');
+    function fail(message){error.textContent=message;error.style.display='block';status.textContent='Ошибка подключения';chrome.webview.postMessage({type:'error',message});}
+    function attachRemote(track){if(track.kind==='audio'){track.attach(remoteAudio);return;}if(track.kind!=='video')return;track.attach(remote);empty.style.display='none';status.textContent='Соединено';}
+    function attachLocal(publication){const track=publication.track;if(track&&track.kind==='video')track.attach(local);}
+    async function startCall(config){
+      document.getElementById('peer').textContent=config.peer||'Tvoice';
+      try{
+        room=new LivekitClient.Room({adaptiveStream:true,dynacast:true,videoCaptureDefaults:{resolution:{width:1280,height:720},frameRate:24}});
+        room.on(LivekitClient.RoomEvent.TrackSubscribed,attachRemote);
+        room.on(LivekitClient.RoomEvent.TrackUnsubscribed,track=>track.detach());
+        room.on(LivekitClient.RoomEvent.LocalTrackPublished,attachLocal);
+        room.on(LivekitClient.RoomEvent.Disconnected,()=>chrome.webview.postMessage({type:'disconnected'}));
+        await room.connect(config.url,config.token,{autoSubscribe:true});
+        try{await room.startAudio()}catch(e){}
+        await room.localParticipant.setMicrophoneEnabled(true);
+        await room.localParticipant.setCameraEnabled(true,{resolution:{width:1280,height:720},frameRate:24});
+        room.localParticipant.trackPublications.forEach(attachLocal);
+        status.textContent='Ожидание собеседника…';
+      }catch(e){fail(e&&e.message?e.message:String(e));}
+    }
+    document.getElementById('mic').onclick=async e=>{if(!room)return;micOn=!micOn;await room.localParticipant.setMicrophoneEnabled(micOn);e.currentTarget.classList.toggle('off',!micOn);};
+    document.getElementById('camera').onclick=async e=>{if(!room)return;cameraOn=!cameraOn;await room.localParticipant.setCameraEnabled(cameraOn);e.currentTarget.classList.toggle('off',!cameraOn);};
+    document.getElementById('switch').onclick=async()=>{if(!room)return;const devices=await LivekitClient.Room.getLocalDevices('videoinput');if(devices.length<2)return;cameraIndex=(cameraIndex+1)%devices.length;await room.switchActiveDevice('videoinput',devices[cameraIndex].deviceId);};
+    document.getElementById('end').onclick=()=>chrome.webview.postMessage({type:'hangup'});
+    const box=document.getElementById('localWrap');let drag=null;
+    box.onpointerdown=e=>{drag={x:e.clientX-box.offsetLeft,y:e.clientY-box.offsetTop};box.setPointerCapture(e.pointerId)};
+    box.onpointermove=e=>{if(!drag)return;const x=Math.max(8,Math.min(innerWidth-box.offsetWidth-8,e.clientX-drag.x));const y=Math.max(70,Math.min(innerHeight-box.offsetHeight-100,e.clientY-drag.y));box.style.left=x+'px';box.style.top=y+'px';box.style.right='auto'};
+    box.onpointerup=()=>drag=null;
+    window.tvoiceStart=startCall;
+    window.addEventListener('beforeunload',()=>{if(room)room.disconnect()});
+  </script>
+</body>
+</html>
