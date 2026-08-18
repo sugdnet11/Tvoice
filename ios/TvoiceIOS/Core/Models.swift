@@ -63,6 +63,13 @@ struct VideoCallCredentials: Decodable, Identifiable, Sendable {
     var id: String { callId }
 }
 
+struct VideoCallParticipantsResponse: Decodable, Sendable {
+    let invited: [Contact]
+    let delivered: [String]
+    let missing: [String]
+    let skipped: [String]
+}
+
 enum CallDirection: String, Codable, Sendable {
     case incoming
     case outgoing
@@ -98,7 +105,9 @@ enum APIError: LocalizedError {
             case "contact_not_found": return "Абонент не найден"
             case "video_unavailable": return "Сервер видеозвонков недоступен"
             case "call_not_found": return "Видеозвонок уже завершён"
+            case "call_not_connected": return "Сначала дождитесь ответа на видеозвонок"
             case "cannot_call_yourself": return "Нельзя позвонить самому себе"
+            case "Not Found": return "Сервер ещё не обновлён для добавления участников"
             default: return "Ошибка сервера \(status): \(code)"
             }
         case .notAuthenticated:

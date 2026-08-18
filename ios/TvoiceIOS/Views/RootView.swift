@@ -37,15 +37,11 @@ struct RootView: View {
             VideoCallView(credentials: credentials)
         }
         .fullScreenCover(isPresented: Binding(
-            get: {
-                if case .incoming = model.sipEngine.callState { return true }
-                if case .calling = model.sipEngine.callState { return true }
-                if case .connected = model.sipEngine.callState { return true }
-                return false
-            },
-            set: { if !$0 { model.activeAudioCallPeer = nil; model.sipEngine.endCall() } }
+            get: { model.activeAudioCallPeer != nil },
+            set: { _ in }
         )) {
             AudioCallView(peer: audioCallPeerName)
+                .interactiveDismissDisabled(true)
         }
         .fullScreenCover(isPresented: Binding(
             get: { api.incomingVideoCall != nil && model.activeVideoCall == nil },

@@ -90,6 +90,11 @@ final class ChatAPIClient: ObservableObject {
         try await request("/v1/video/calls/\(callID)/answer", method: "POST", body: Data("{}".utf8))
     }
 
+    func addVideoParticipants(callID: String, peers: [String]) async throws -> VideoCallParticipantsResponse {
+        let body = try JSONEncoder().encode(VideoParticipantsRequest(peerSipNumbers: peers))
+        return try await request("/v1/video/calls/\(callID)/participants", method: "POST", body: body)
+    }
+
     func rejectVideoCall(callID: String) async {
         try? await emptyRequest("/v1/video/calls/\(callID)/reject")
         if incomingVideoCall?.id == callID { incomingVideoCall = nil }
@@ -228,6 +233,7 @@ final class ChatAPIClient: ObservableObject {
 
 private struct LoginRequest: Encodable { let sipNumber: String; let password: String }
 private struct DirectRequest: Encodable { let peerSipNumber: String }
+private struct VideoParticipantsRequest: Encodable { let peerSipNumbers: [String] }
 private struct MessageRequest: Encodable { let body: String }
 private struct ContactsResponse: Decodable { let contacts: [Contact] }
 private struct ConversationsResponse: Decodable { let conversations: [Conversation] }

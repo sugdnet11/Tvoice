@@ -18,30 +18,68 @@ struct SipMessage {
     }
     
     func header(_ name: String) -> String? {
-        headers.first(where: { $0.key.lowercased() == name.lowercased() })?.value.first
+        let normalized = name.lowercased()
+        let compact: String?
+        switch normalized {
+        case "via": compact = "v"
+        case "from": compact = "f"
+        case "to": compact = "t"
+        case "call-id": compact = "i"
+        case "contact": compact = "m"
+        case "content-length": compact = "l"
+        case "content-type": compact = "c"
+        default: compact = nil
+        }
+        return headers.first(where: { $0.key.lowercased() == normalized })?.value.first
+            ?? compact.flatMap { short in headers.first(where: { $0.key.lowercased() == short })?.value.first }
     }
     
     func headers(_ name: String) -> [String] {
-        headers.first(where: { $0.key.lowercased() == name.lowercased() })?.value ?? []
+        let normalized = name.lowercased()
+        return headers.first(where: { $0.key.lowercased() == normalized })?.value ?? []
+    }
+
+    var cseqMethod: String? {
+        header("CSeq")?
+            .split(separator: " ")
+            .last
+            .map { String($0).uppercased() }
+    }
+
+    var cseqNumber: Int? {
+        header("CSeq")?
+            .split(separator: " ")
+            .first
+            .flatMap { Int($0) }
     }
     
     static func parse(_ raw: String) -> SipMessage? {
-        let parts = raw.components(separatedBy: "\r\n\r\n")
-        guard parts.count >= 1 else { return nil }
+        let normalizedRaw = raw.replacingOccurrences(of: "\r\n", with: "\n")
+        let parts = normalizedRaw.components(separatedBy: "\n\n")
         
         let headerBlock = parts[0]
         let body = parts.count > 1 ? parts[1] : ""
         
-        let lines = headerBlock.components(separatedBy: "\r\n")
+        let lines = headerBlock.components(separatedBy: "\n")
         guard let firstLine = lines.first, !firstLine.isEmpty else { return nil }
         
         var parsedHeaders = [String: [String]]()
+        var lastKey: String?
         for i in 1..<lines.count {
             let line = lines[i]
+            if (line.starts(with: " ") || line.starts(with: "\t")), let lastKey {
+                var values = parsedHeaders[lastKey] ?? []
+                if let last = values.indices.last {
+                    values[last] += " " + line.trimmingCharacters(in: .whitespaces)
+                    parsedHeaders[lastKey] = values
+                }
+                continue
+            }
             guard let colonIdx = line.firstIndex(of: ":") else { continue }
             let key = String(line[..<colonIdx]).trimmingCharacters(in: .whitespaces)
             let val = String(line[line.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
             parsedHeaders[key, default: []].append(val)
+            lastKey = key
         }
         
         return SipMessage(startLine: firstLine, headers: parsedHeaders, body: body)
@@ -53,11 +91,12 @@ struct SdpOfferAnswer {
     let mediaPort: UInt16
     let selectedCodecPayload: UInt8
     
-    static func parse(_ sdp: String) -> SdpOfferAnswer? {
+    static func parse(_ sdp: String, fallbackHost: String? = nil) -> SdpOfferAnswer? {
         var host: String?
         var port: UInt16?
         var payload: UInt8?
         var insideAudioSection = false
+        var transportSupported = false
         
         let lines = sdp.components(separatedBy: CharacterSet.newlines)
         for line in lines {
@@ -70,15 +109,23 @@ struct SdpOfferAnswer {
                           let parsedPort = UInt16(parts[1]),
                           parsedPort > 0,
                           parsedPort != AppConfig.sipPort else { return nil }
+                    transportSupported = ["RTP/AVP", "RTP/AVPF"].contains(parts[2].uppercased())
                     port = parsedPort
                     payload = parts.dropFirst(3).compactMap { UInt8($0) }.first(where: { $0 == 8 || $0 == 0 })
                 }
-            } else if trimmed.starts(with: "c=IN IP4 "), host == nil || insideAudioSection {
-                host = trimmed.replacingOccurrences(of: "c=IN IP4 ", with: "").trimmingCharacters(in: .whitespaces)
+            } else if trimmed.starts(with: "c=IN IP4 ") || trimmed.starts(with: "c=IN IP6 ") {
+                if host == nil || insideAudioSection {
+                    host = trimmed
+                        .split(separator: " ")
+                        .last
+                        .map(String.init)?
+                        .trimmingCharacters(in: .whitespaces)
+                }
             }
         }
         
-        guard let h = host,
+        guard transportSupported,
+              let h = host ?? fallbackHost,
               h != "0.0.0.0",
               let p = port,
               let selectedPayload = payload else { return nil }
@@ -115,7 +162,7 @@ final class SipDialog {
         self.localTag = localTag
         self.localCSeq = 1
         self.remoteCSeq = 0
-        self.viaBranch = "z9hG4bK-\(UUID().uuidString)"
+        self.viaBranch = Self.newBranch()
         self.requestURI = "sip:\(peerNumber)@\(AppConfig.sipHost)"
         self.remoteTarget = "sip:\(peerNumber)@\(AppConfig.sipHost)"
         self.routeSet = []
@@ -124,7 +171,19 @@ final class SipDialog {
     func update(fromInviteResponse message: SipMessage) {
         remoteTag = Self.parameter(named: "tag", in: message.header("To")) ?? remoteTag
         remoteTarget = Self.uri(in: message.header("Contact")) ?? remoteTarget
+        let routes = message.headers("Record-Route")
+        if !routes.isEmpty {
+            routeSet = routes.reversed()
+        }
         connected = message.statusCode == 200
+    }
+
+    func updateEarlyDialog(fromInviteResponse message: SipMessage) {
+        remoteTag = Self.parameter(named: "tag", in: message.header("To")) ?? remoteTag
+        let routes = message.headers("Record-Route")
+        if !routes.isEmpty {
+            routeSet = routes.reversed()
+        }
     }
 
     static func incoming(peerNumber: String, request: SipMessage) -> SipDialog? {
@@ -153,5 +212,14 @@ final class SipDialog {
         let marker = ";\(name)="
         guard let range = header.range(of: marker, options: .caseInsensitive) else { return nil }
         return String(header[range.upperBound...].prefix { $0 != ";" && !$0.isWhitespace })
+    }
+
+    static func newBranch() -> String {
+        "z9hG4bK-\(randomHex(10))"
+    }
+
+    static func randomHex(_ count: Int) -> String {
+        let alphabet = Array("0123456789abcdef")
+        return String((0..<count).map { _ in alphabet.randomElement() ?? Character("0") })
     }
 }

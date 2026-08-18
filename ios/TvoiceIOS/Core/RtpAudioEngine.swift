@@ -28,6 +28,7 @@ final class RtpAudioEngine {
     private var speakerEnabled = false
     private var isRebuildingAudioGraph = false
     private var notificationTokens = [NSObjectProtocol]()
+    private let speakerPlaybackGain: Float = 2.8
     
     private var ssrc: UInt32 = UInt32.random(in: 1...UInt32.max)
     private var sequenceNumber: UInt16 = UInt16.random(in: 1...UInt16.max)
@@ -126,15 +127,27 @@ final class RtpAudioEngine {
     }
 
     func setSpeaker(_ enabled: Bool) {
+        speakerEnabled = enabled
         do {
-            speakerEnabled = enabled
             try configureAudioSession(speaker: enabled)
-            try rebuildAudioGraph()
+            restartAudioGraphIfNeeded()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                self?.restartAudioGraphIfNeeded()
+                self?.applyCurrentAudioRoute()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.applyCurrentAudioRoute()
             }
         } catch {
             print("Failed to switch audio route:", error)
+        }
+    }
+
+    func handleSystemAudioSessionActivated() {
+        do {
+            try configureAudioSession(speaker: speakerEnabled)
+            restartAudioGraphIfNeeded()
+        } catch {
+            print("Failed to restore audio after CallKit activation:", error)
         }
     }
 
@@ -143,9 +156,21 @@ final class RtpAudioEngine {
         let options: AVAudioSession.CategoryOptions = speaker
             ? [.allowBluetoothHFP, .defaultToSpeaker]
             : [.allowBluetoothHFP]
-        try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: options)
+        try audioSession.setCategory(.playAndRecord, mode: speaker ? .videoChat : .voiceChat, options: options)
+        try audioSession.setPreferredSampleRate(48_000)
+        try audioSession.setPreferredIOBufferDuration(0.02)
         try audioSession.setActive(true)
         try audioSession.overrideOutputAudioPort(speaker ? .speaker : .none)
+    }
+
+    private func applyCurrentAudioRoute() {
+        guard isRunning else { return }
+        do {
+            try configureAudioSession(speaker: speakerEnabled)
+            restartAudioGraphIfNeeded()
+        } catch {
+            print("Failed to apply audio route:", error)
+        }
     }
 
     private func installAudioSessionObservers() {
@@ -158,7 +183,7 @@ final class RtpAudioEngine {
                 queue: .main
             ) { [weak self] _ in
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    self?.restartAudioGraphIfNeeded()
+                    self?.applyCurrentAudioRoute()
                 }
             }
         )
@@ -212,6 +237,8 @@ final class RtpAudioEngine {
         let player = AVAudioPlayerNode()
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: pcm8kFormat)
+        player.volume = 1.0
+        engine.mainMixerNode.outputVolume = 1.0
 
         let inputNode = engine.inputNode
         let nativeInputFormat = inputNode.outputFormat(forBus: 0)
@@ -360,6 +387,11 @@ final class RtpAudioEngine {
                 for i in 0..<count {
                     channelData[i] = Float(RtpCodecs.alawToLinear(bytes[i])) / Float(Int16.max)
                 }
+            }
+        }
+        if speakerEnabled {
+            for i in 0..<count {
+                channelData[i] = max(-1.0, min(1.0, channelData[i] * speakerPlaybackGain))
             }
         }
         

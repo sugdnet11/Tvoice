@@ -65,7 +65,7 @@ struct AudioCallView: View {
 
                         // Accept Button
                         Button {
-                            model.answerIncomingAudioCall()
+                            Task { await model.answerIncomingAudioCall() }
                         } label: {
                             VStack(spacing: 6) {
                                 Circle()
@@ -84,30 +84,95 @@ struct AudioCallView: View {
                     }
                     .padding(.bottom, 48)
                 } else {
-                    // Active call controls: Mute, End, Loudspeaker
-                    VStack(spacing: 22) {
-                    HStack(spacing: 28) {
-                        // Mute Button
-                        Button {
-                            isMuted.toggle()
-                            model.sipEngine.setMuted(isMuted)
-                        } label: {
-                            VStack(spacing: 6) {
-                                Circle()
-                                    .fill(isMuted ? Color.white : Color.white.opacity(0.18))
-                                    .frame(width: 60, height: 60)
-                                    .overlay(
-                                        Image(systemName: isMuted ? "mic.slash.fill" : "mic.fill")
-                                            .font(.title2)
-                                            .foregroundStyle(isMuted ? Color.tvoiceNavy : Color.white)
-                                    )
-                                Text(isMuted ? "Выкл. микр." : "Микрофон")
-                                    .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.8))
+                    VStack(spacing: 28) {
+                        HStack(spacing: 14) {
+                            Button {
+                                isMuted.toggle()
+                                model.sipEngine.setMuted(isMuted)
+                            } label: {
+                                VStack(spacing: 6) {
+                                    Circle()
+                                        .fill(isMuted ? Color.white : Color.white.opacity(0.18))
+                                        .frame(width: 56, height: 56)
+                                        .overlay(
+                                            Image(systemName: isMuted ? "mic.slash.fill" : "mic.fill")
+                                                .font(.title3)
+                                                .foregroundStyle(isMuted ? Color.tvoiceNavy : Color.white)
+                                        )
+                                    Text(isMuted ? "Выкл." : "Микрофон")
+                                        .font(.caption2)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.8)
+                                        .foregroundStyle(.white.opacity(0.8))
+                                }
+                                .frame(width: 72)
+                            }
+
+                            Button {
+                                model.toggleAudioHold()
+                            } label: {
+                                VStack(spacing: 6) {
+                                    Circle()
+                                        .fill(model.sipEngine.isCallHeld ? Color.white : Color.white.opacity(0.18))
+                                        .frame(width: 56, height: 56)
+                                        .overlay(
+                                            Image(systemName: model.sipEngine.isCallHeld ? "play.fill" : "pause.fill")
+                                                .font(.title3)
+                                                .foregroundStyle(model.sipEngine.isCallHeld ? Color.tvoiceNavy : Color.white)
+                                        )
+                                    Text(model.sipEngine.isCallHeld ? "Вернуть" : "Удержать")
+                                        .font(.caption2)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.8)
+                                        .foregroundStyle(.white.opacity(0.8))
+                                }
+                                .frame(width: 72)
+                            }
+
+                            Button {
+                                showingConference = true
+                            } label: {
+                                VStack(spacing: 6) {
+                                    Circle()
+                                        .fill(Color.white.opacity(0.18))
+                                        .frame(width: 56, height: 56)
+                                        .overlay(
+                                            Image(systemName: "person.3.fill")
+                                                .font(.title3)
+                                                .foregroundStyle(.white)
+                                        )
+                                    Text("Конф.")
+                                        .font(.caption2)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.8)
+                                        .foregroundStyle(.white.opacity(0.8))
+                                }
+                                .frame(width: 72)
+                            }
+
+                            Button {
+                                isSpeaker.toggle()
+                                model.sipEngine.toggleSpeaker(enabled: isSpeaker)
+                            } label: {
+                                VStack(spacing: 6) {
+                                    Circle()
+                                        .fill(isSpeaker ? Color.white : Color.white.opacity(0.18))
+                                        .frame(width: 56, height: 56)
+                                        .overlay(
+                                            Image(systemName: isSpeaker ? "speaker.wave.3.fill" : "speaker.slash.fill")
+                                                .font(.title3)
+                                                .foregroundStyle(isSpeaker ? Color.tvoiceNavy : Color.white)
+                                        )
+                                    Text(isSpeaker ? "Динамик" : "Слуховой")
+                                        .font(.caption2)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.8)
+                                        .foregroundStyle(.white.opacity(0.8))
+                                }
+                                .frame(width: 72)
                             }
                         }
 
-                        // Hangup Button
                         Button {
                             timer?.invalidate()
                             model.finishAudioCall()
@@ -115,7 +180,7 @@ struct AudioCallView: View {
                             VStack(spacing: 6) {
                                 Circle()
                                     .fill(Color.red)
-                                    .frame(width: 72, height: 72)
+                                    .frame(width: 78, height: 78)
                                     .overlay(
                                         Image(systemName: "phone.down.fill")
                                             .font(.title)
@@ -127,64 +192,6 @@ struct AudioCallView: View {
                                     .foregroundStyle(.white)
                             }
                         }
-
-                        // Loudspeaker Button
-                        Button {
-                            isSpeaker.toggle()
-                            model.sipEngine.toggleSpeaker(enabled: isSpeaker)
-                        } label: {
-                            VStack(spacing: 6) {
-                                Circle()
-                                    .fill(isSpeaker ? Color.white : Color.white.opacity(0.18))
-                                    .frame(width: 60, height: 60)
-                                    .overlay(
-                                        Image(systemName: isSpeaker ? "speaker.wave.3.fill" : "speaker.slash.fill")
-                                            .font(.title2)
-                                            .foregroundStyle(isSpeaker ? Color.tvoiceNavy : Color.white)
-                                    )
-                                Text(isSpeaker ? "Динамик" : "Слуховой")
-                                    .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.8))
-                            }
-                        }
-                    }
-                    HStack(spacing: 28) {
-                        Button {
-                            model.toggleAudioHold()
-                        } label: {
-                            VStack(spacing: 6) {
-                                Circle()
-                                    .fill(model.sipEngine.isCallHeld ? Color.white : Color.white.opacity(0.18))
-                                    .frame(width: 60, height: 60)
-                                    .overlay(
-                                        Image(systemName: model.sipEngine.isCallHeld ? "play.fill" : "pause.fill")
-                                            .font(.title2)
-                                            .foregroundStyle(model.sipEngine.isCallHeld ? Color.tvoiceNavy : Color.white)
-                                    )
-                                Text(model.sipEngine.isCallHeld ? "Вернуть" : "Удержать")
-                                    .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.8))
-                            }
-                        }
-
-                        Button {
-                            showingConference = true
-                        } label: {
-                            VStack(spacing: 6) {
-                                Circle()
-                                    .fill(Color.white.opacity(0.18))
-                                    .frame(width: 60, height: 60)
-                                    .overlay(
-                                        Image(systemName: "person.3.fill")
-                                            .font(.title2)
-                                            .foregroundStyle(.white)
-                                    )
-                                Text("Конференция")
-                                    .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.8))
-                            }
-                        }
-                    }
                     }
                     .padding(.bottom, 48)
                 }
@@ -229,7 +236,7 @@ struct AudioCallView: View {
         case .incoming:
             return "Входящий вызов…"
         case .calling:
-            return "Вызов FreePBX…"
+            return "Вызов"
         case .connected:
             let minutes = elapsed / 60
             let seconds = elapsed % 60
