@@ -1,0 +1,12 @@
+[Unit]
+Description=Tvoice chat and LiveKit NAT rules
+Wants=network-online.target
+After=network-online.target networking.service pve-firewall.service proxmox-firewall.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tvoice-nat.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

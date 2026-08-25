@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>tvoice_sip_bridge</AssemblyName>
+    <RootNamespace>Tvoice.SipBridge</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Tvoice.Windows\Sip\SipProtocol.cs" Link="Sip\SipProtocol.cs" />
+    <Compile Include="..\Tvoice.Windows\Sip\RtpAudioSession.cs" Link="Sip\RtpAudioSession.cs" />
+    <Compile Include="..\Tvoice.Windows\Sip\TvoiceSipRegistration.cs" Link="Sip\TvoiceSipRegistration.cs" />
+  </ItemGroup>
+</Project>

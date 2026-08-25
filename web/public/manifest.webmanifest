@@ -1,0 +1,35 @@
+{
+  "name": "Tvoice",
+  "short_name": "Tvoice",
+  "description": "Звонки, видеосвязь и сообщения между абонентами Tvoice",
+  "lang": "ru",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "background_color": "#f4f7fb",
+  "theme_color": "#1479ef",
+  "categories": ["social", "communication"],
+  "icons": [
+    {
+      "src": "/tvoice-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Чаты",
+      "short_name": "Чаты",
+      "url": "/?tab=chats",
+      "icons": [{ "src": "/tvoice-icon.png", "sizes": "512x512" }]
+    },
+    {
+      "name": "Контакты",
+      "short_name": "Контакты",
+      "url": "/?tab=contacts",
+      "icons": [{ "src": "/tvoice-icon.png", "sizes": "512x512" }]
+    }
+  ]
+}

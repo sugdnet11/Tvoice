@@ -1,0 +1,211 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, "Segoe UI", sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.guest-lobby,
+.guest-room {
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  background: #f4f7fb;
+  color: #101b36;
+}
+
+.guest-lobby {
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  padding: 24px;
+}
+
+.guest-lobby-card {
+  width: min(460px, 100%);
+  box-sizing: border-box;
+  background: #fff;
+  border: 1px solid #dce5f2;
+  border-radius: 24px;
+  padding: 34px;
+  box-shadow: 0 18px 50px #113b7718;
+}
+
+.guest-brand { font-size: 26px; font-weight: 900; color: #087dff; }
+.guest-lobby h1 { font-size: 28px; margin: 28px 0 8px; }
+.guest-lobby p { color: #64748b; }
+.guest-lobby label { display: grid; gap: 8px; margin: 24px 0 12px; font-weight: 700; }
+.guest-lobby input,
+.guest-chat input { border: 1px solid #d4deeb; border-radius: 12px; padding: 13px; font: inherit; }
+.guest-lobby button,
+.guest-open-app { display: block; width: 100%; box-sizing: border-box; border: 0; border-radius: 12px; padding: 13px; text-align: center; font: inherit; font-weight: 800; text-decoration: none; }
+.guest-lobby button { background: #087dff; color: #fff; }
+.guest-lobby button:disabled { opacity: .5; }
+.guest-open-app { margin-top: 10px; color: #087dff; background: #eaf4ff; }
+.guest-error { color: #dc2626 !important; }
+
+.guest-room {
+  position: relative;
+  display: grid;
+  grid-template-rows: 58px minmax(0, 1fr) auto;
+  background: #0b1220;
+  color: #fff;
+}
+
+.guest-audio-output {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.guest-audio-output audio {
+  width: 1px;
+  height: 1px;
+}
+
+.guest-enable-audio {
+  position: absolute;
+  z-index: 20;
+  top: 68px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transform: translateX(-50%);
+  border: 0;
+  border-radius: 999px;
+  padding: 11px 18px;
+  background: #087dff;
+  color: #fff;
+  box-shadow: 0 10px 30px #0007;
+  font: inherit;
+  font-weight: 800;
+}
+
+.guest-room > header {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: env(safe-area-inset-top, 0) 22px 0;
+  background: #111b2d;
+}
+
+.guest-room > header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.guest-room > header span { flex: none; color: #94a3b8; }
+
+.guest-room-body {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.guest-grid {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  gap: 4px;
+  padding: 4px;
+  box-sizing: border-box;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+}
+
+.guest-grid[data-count="1"],
+.guest-grid[data-count="2"] { grid-template-columns: 1fr; }
+.guest-grid[data-count="3"],
+.guest-grid[data-count="4"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.guest-grid[data-count="5"],
+.guest-grid[data-count="6"],
+.guest-grid[data-count="7"],
+.guest-grid[data-count="8"],
+.guest-grid[data-count="9"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.guest-video-tile {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background: #1e293b;
+}
+
+.guest-video-tile.is-speaking { border-color: #1687ff; }
+.guest-video-host,
+.guest-video-host video { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: cover; }
+.guest-video-host.is-local video { transform: scaleX(-1); }
+.guest-avatar { position: absolute; inset: 0; display: grid; place-items: center; font-size: 52px; font-weight: 800; }
+.guest-video-name { position: absolute; left: 10px; bottom: 9px; padding: 5px 9px; border-radius: 8px; background: #07101dbb; font-size: 12px; font-weight: 800; }
+
+.guest-chat {
+  position: absolute;
+  z-index: 5;
+  top: 8px;
+  right: 8px;
+  bottom: 8px;
+  width: min(340px, calc(100% - 16px));
+  display: flex;
+  flex-direction: column;
+  color: #101b36;
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 20px 60px #0008;
+  transform: translateX(calc(100% + 24px));
+  visibility: hidden;
+  transition: transform .2s ease, visibility .2s;
+}
+
+.guest-chat.is-open { transform: translateX(0); visibility: visible; }
+.guest-chat h2 { display: flex; align-items: center; justify-content: space-between; padding: 16px; margin: 0; font-size: 17px; }
+.guest-chat h2 button { border: 0; background: transparent; color: #64748b; font: inherit; font-size: 26px; cursor: pointer; }
+.guest-messages { flex: 1; min-height: 0; overflow: auto; padding: 12px; }
+.guest-messages > div { width: max-content; max-width: 90%; padding: 8px 10px; margin: 0 0 8px; border-radius: 10px; background: #e9eef5; }
+.guest-messages > div.mine { margin-left: auto; background: #087dff; color: #fff; }
+.guest-messages small { display: block; font-weight: 800; }
+.guest-chat form { display: flex; gap: 6px; padding: 10px; }
+.guest-chat form input { min-width: 0; flex: 1; }
+.guest-chat form button { border: 0; border-radius: 10px; background: #087dff; color: #fff; padding: 10px; }
+
+.guest-controls {
+  z-index: 10;
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 14px calc(10px + env(safe-area-inset-bottom, 0px));
+  background: #111b2d;
+}
+
+.guest-controls button { display: grid; place-items: center; width: 46px; height: 46px; border: 0; border-radius: 50%; background: #fff; color: #101b36; }
+.guest-controls button.active { background: #087dff; color: #fff; }
+.guest-controls button.danger { background: #ef2b2d; color: #fff; }
+
+@media (max-width: 800px) {
+  .guest-room { grid-template-rows: 46px minmax(0, 1fr) auto; }
+  .guest-room > header { padding-inline: 12px; font-size: 13px; }
+  .guest-enable-audio { top: 54px; }
+  .guest-grid { gap: 3px; padding: 3px; }
+  .guest-video-tile { border-radius: 5px; }
+  .guest-controls { gap: 7px; padding-inline: 8px; }
+  .guest-controls button { width: 43px; height: 43px; }
+}
+
+@media (max-width: 390px) {
+  .guest-controls { gap: 5px; }
+  .guest-controls button { width: 40px; height: 40px; }
+}
