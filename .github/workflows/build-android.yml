@@ -1,0 +1,109 @@
+name: Tvoice Android — Build & Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [android]
+    tags: ["android-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.0"
+          channel: stable
+          cache: true
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Configure production signing
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64" && test -n "$STORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD"
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/tvoice-release.jks"
+          echo "TVOICE_SIGNING_STORE_FILE=$RUNNER_TEMP/tvoice-release.jks" >> "$GITHUB_ENV"
+          echo "TVOICE_SIGNING_STORE_PASSWORD=$STORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "TVOICE_SIGNING_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "TVOICE_SIGNING_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Build diagnostic APK
+        if: ${{ !startsWith(github.ref, 'refs/tags/android-v') }}
+        run: flutter build apk --debug
+
+      - name: Build signed release APK and AAB
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        run: |
+          flutter build apk --release
+          flutter build appbundle --release
+
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cut -d+ -f1 VERSION)"
+          mkdir -p release-output
+          if [[ "$GITHUB_REF" == refs/tags/android-v* ]]; then
+            cp build/app/outputs/flutter-apk/app-release.apk "release-output/Tvoice-Android-v${version}.apk"
+            cp build/app/outputs/bundle/release/app-release.aab "release-output/Tvoice-Android-v${version}.aab"
+          else
+            cp build/app/outputs/flutter-apk/app-debug.apk "release-output/Tvoice-Android-v${version}-debug.apk"
+          fi
+          (cd release-output && sha256sum Tvoice-Android-* > "Tvoice-Android-v${version}-SHA256.txt")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tvoice-android-${{ github.sha }}
+          path: release-output/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/android-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tvoice-android-${{ github.sha }}
+          path: release-output
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Tvoice Android 0.17.10
+          body: |
+            Platform branch: android
+            Source commit: ${{ github.sha }}
+            Tests: flutter analyze + flutter test passed
+            Signing: production keystore from GitHub Secrets
+          files: release-output/*
+
