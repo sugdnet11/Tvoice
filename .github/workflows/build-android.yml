@@ -76,10 +76,10 @@ jobs:
           set -euo pipefail
           apksigner_path="$(find "$ANDROID_SDK_ROOT/build-tools" -maxdepth 2 -type f -name apksigner | sort -V | tail -1)"
           test -x "$apksigner_path"
-          actual="$($apksigner_path verify --print-certs build/app/outputs/flutter-apk/app-release.apk | awk -F': ' '/SHA-256 digest/ {print tolower($2); exit}')"
           expected="5c7f64ece62ec08aa11cabf2ce51ce0482ef4747d56f4f6193ad62233748b745"
-          echo "Signer certificate SHA-256: $actual"
-          test "$actual" = "$expected"
+          certificate_line="$($apksigner_path verify --print-certs build/app/outputs/flutter-apk/app-release.apk | grep -i -F "SHA-256 digest: $expected")"
+          test -n "$certificate_line"
+          echo "Signer certificate SHA-256: $expected"
 
       - name: Prepare artifacts
         shell: bash
@@ -116,6 +116,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           name: Tvoice Android 0.17.10
+          prerelease: true
           body: |
             Platform branch: android
             Source commit: ${{ github.sha }}
