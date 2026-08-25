@@ -24,7 +24,6 @@ jobs:
         with:
           flutter-version: "3.47.0"
           channel: stable
-          cache: true
 
       - uses: actions/setup-dotnet@v4
         with:
