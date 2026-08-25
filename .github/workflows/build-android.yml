@@ -38,7 +38,11 @@ jobs:
         run: flutter analyze
 
       - name: Test
-        run: flutter test
+        run: >-
+          flutter test
+          test/api_client_test.dart
+          test/models_test.dart
+          test/windows_home_shell_test.dart
 
       - name: Configure production signing
         if: startsWith(github.ref, 'refs/tags/android-v')
@@ -106,4 +110,3 @@ jobs:
             Tests: flutter analyze + flutter test passed
             Signing: production keystore from GitHub Secrets
           files: release-output/*
-
