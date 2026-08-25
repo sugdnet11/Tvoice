@@ -30,6 +30,10 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.19.0"
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -37,10 +41,6 @@ jobs:
           cache-dependency-path: |
             server-backend/pnpm-lock.yaml
             web/pnpm-lock.yaml
-
-      - name: Enable pnpm
-        shell: pwsh
-        run: corepack enable
 
       - name: Resolve Flutter dependencies
         run: flutter pub get
@@ -112,4 +112,3 @@ jobs:
             Tests: Flutter, server typecheck and guest web tests passed
             Signing: Unsigned build — Windows SmartScreen may show a warning
           files: release-output/*
-
