@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../controllers/app_controller.dart';
 import '../core/app_config.dart';
 import '../models/models.dart';
 import '../services/sip_bridge.dart';
+import '../services/android_platform_bridge.dart';
 import 'android_audio_call_screen.dart';
 import 'android_conversation_screen.dart';
 import 'conference_screen.dart';
@@ -21,17 +25,40 @@ class _AndroidHomeShellState extends State<AndroidHomeShell> {
   bool dialer = false;
   bool audioVisible = false;
   String? shownVideoCall;
+  String? _handledInviteToken;
 
   @override
   void initState() {
     super.initState();
     widget.controller.addListener(_changed);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(AndroidPlatformBridge.initialize(onLink: _handleAppLink));
+    });
   }
 
   @override
   void dispose() {
     widget.controller.removeListener(_changed);
+    AndroidPlatformBridge.dispose();
     super.dispose();
+  }
+
+  Future<void> _handleAppLink(Uri uri) async {
+    final token = ConferenceLink.inviteToken(uri);
+    if (token == null || token == _handledInviteToken || !mounted) return;
+    _handledInviteToken = token;
+    try {
+      final session = await widget.controller.joinConference(token);
+      if (mounted) await _openVideo(session);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Не удалось войти по ссылке: $error')),
+        );
+      }
+    } finally {
+      _handledInviteToken = null;
+    }
   }
 
   void _changed() {
@@ -144,6 +171,7 @@ class _AndroidHomeShellState extends State<AndroidHomeShell> {
               onCall: _audio,
             ),
       _Chats(controller: widget.controller, open: _openConversation),
+      _Conferences(controller: widget.controller, open: _openVideo),
       _Account(controller: widget.controller),
     ];
     return PopScope(
@@ -208,10 +236,16 @@ class _AndroidHomeShellState extends State<AndroidHomeShell> {
                   tap: () => _select(2),
                 ),
                 _Nav(
-                  icon: Icons.person_rounded,
-                  label: 'Аккаунт',
+                  icon: Icons.groups_rounded,
+                  label: 'Конференции',
                   selected: index == 3,
                   tap: () => _select(3),
+                ),
+                _Nav(
+                  icon: Icons.person_rounded,
+                  label: 'Аккаунт',
+                  selected: index == 4,
+                  tap: () => _select(4),
                 ),
               ],
             ),
@@ -879,6 +913,609 @@ class _ChatsState extends State<_Chats> {
   }
 }
 
+class _Conferences extends StatefulWidget {
+  const _Conferences({required this.controller, required this.open});
+  final AppController controller;
+  final Future<void> Function(VideoCallSession session) open;
+
+  @override
+  State<_Conferences> createState() => _ConferencesState();
+}
+
+class _ConferencesState extends State<_Conferences> {
+  List<ConferenceRoom> rooms = const [];
+  bool loading = true;
+  bool creating = false;
+  String? openingId;
+  String? revokingId;
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  Future<void> _load({bool progress = true}) async {
+    if (progress && mounted) setState(() => loading = true);
+    try {
+      final result = await widget.controller.conferenceRooms();
+      if (!mounted) return;
+      setState(() {
+        rooms = result;
+        error = null;
+      });
+    } catch (loadError) {
+      if (mounted) setState(() => error = loadError.toString());
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  Future<void> _create() async {
+    final options = await showModalBottomSheet<_ConferenceOptions>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (_) => const _CreateConferenceSheet(),
+    );
+    if (options == null || !mounted) return;
+    setState(() => creating = true);
+    try {
+      final room = await widget.controller.createConferenceRoom(
+        title: options.title,
+        allowGuests: options.allowGuests,
+      );
+      if (!mounted) return;
+      setState(() => rooms = [room, ...rooms]);
+      await _showCreated(room);
+    } catch (createError) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Не удалось создать комнату: $createError')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => creating = false);
+    }
+  }
+
+  Future<void> _showCreated(ConferenceRoom room) => showModalBottomSheet<void>(
+    context: context,
+    useSafeArea: true,
+    builder: (context) {
+      final p = AndroidPalette.of(context);
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: p.line,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            const Icon(
+              Icons.check_circle_rounded,
+              color: AndroidPalette.green,
+              size: 48,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Комната создана',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: p.primary,
+                fontSize: 21,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Она сохранена на сервере и не запускается автоматически.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: p.secondary),
+            ),
+            if (room.inviteUrl.isNotEmpty) ...[
+              const SizedBox(height: 18),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: p.search,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  room.inviteUrl,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: AndroidPalette.blue,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: () => _share(room),
+                icon: const Icon(Icons.share_rounded),
+                label: const Text('Поделиться ссылкой'),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => _copy(room),
+                icon: const Icon(Icons.content_copy_rounded),
+                label: const Text('Копировать'),
+              ),
+            ],
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Готово'),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+
+  Future<void> _open(ConferenceRoom room) async {
+    setState(() => openingId = room.id);
+    try {
+      final session = await widget.controller.openConferenceRoom(room);
+      if (mounted) await widget.open(session);
+    } catch (openError) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Не удалось войти в комнату: $openError')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => openingId = null);
+    }
+  }
+
+  Future<void> _copy(ConferenceRoom room) async {
+    if (room.inviteUrl.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: room.inviteUrl));
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Ссылка скопирована')));
+    }
+  }
+
+  Future<void> _share(ConferenceRoom room) async {
+    if (room.inviteUrl.isEmpty) return;
+    final shared = await AndroidPlatformBridge.shareText(
+      text: '${room.title}\n${room.inviteUrl}',
+      title: 'Приглашение в Tvoice',
+    );
+    if (!shared) await _copy(room);
+  }
+
+  Future<void> _revoke(ConferenceRoom room) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Аннулировать ссылку?'),
+        content: Text(
+          'Комната «${room.title}» будет закрыта для всех участников, '
+          'а сохранённая ссылка перестанет работать.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: FilledButton.styleFrom(backgroundColor: AndroidPalette.red),
+            child: const Text('Аннулировать'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => revokingId = room.id);
+    try {
+      await widget.controller.revokeConferenceRoom(room.id);
+      if (!mounted) return;
+      setState(
+        () => rooms = rooms.where((item) => item.id != room.id).toList(),
+      );
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Комната закрыта, ссылка аннулирована')),
+      );
+    } catch (revokeError) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Не удалось закрыть комнату: $revokeError')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => revokingId = null);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = AndroidPalette.of(context);
+    return _Page(
+      title: 'Конференции',
+      fab: FloatingActionButton(
+        onPressed: creating ? null : _create,
+        backgroundColor: AndroidPalette.blue,
+        foregroundColor: Colors.white,
+        child: creating
+            ? const SizedBox.square(
+                dimension: 22,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white,
+                ),
+              )
+            : const Icon(Icons.add_rounded),
+      ),
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: p.surface,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: p.line),
+            ),
+            child: Row(
+              children: [
+                const CircleAvatar(
+                  backgroundColor: Color(0xffe7f2ff),
+                  foregroundColor: AndroidPalette.blue,
+                  child: Icon(Icons.video_camera_front_rounded),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Постоянные комнаты',
+                        style: TextStyle(
+                          color: p.primary,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        'Создайте ссылку и входите в комнату в любое время.',
+                        style: TextStyle(color: p.secondary, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Обновить',
+                  onPressed: loading ? null : _load,
+                  icon: const Icon(Icons.refresh_rounded),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          Expanded(child: _roomsBody(p)),
+        ],
+      ),
+    );
+  }
+
+  Widget _roomsBody(AndroidPalette p) {
+    if (loading && rooms.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (error != null && rooms.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.cloud_off_outlined,
+              color: AndroidPalette.red,
+              size: 44,
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Не удалось загрузить комнаты',
+              style: TextStyle(color: p.primary, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              error!,
+              textAlign: TextAlign.center,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: p.secondary, fontSize: 12),
+            ),
+            TextButton(onPressed: _load, child: const Text('Повторить')),
+          ],
+        ),
+      );
+    }
+    if (rooms.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: () => _load(progress: false),
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: [
+            const SizedBox(height: 90),
+            const Icon(
+              Icons.groups_outlined,
+              color: AndroidPalette.blue,
+              size: 52,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Комнат пока нет',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: p.primary,
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              'Нажмите «+», чтобы создать постоянную ссылку',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: p.secondary, fontSize: 12),
+            ),
+          ],
+        ),
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: () => _load(progress: false),
+      child: ListView.separated(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.only(bottom: 88),
+        itemCount: rooms.length,
+        separatorBuilder: (_, _) => const SizedBox(height: 9),
+        itemBuilder: (context, index) => _roomCard(rooms[index], p),
+      ),
+    );
+  }
+
+  Widget _roomCard(ConferenceRoom room, AndroidPalette p) {
+    final opening = openingId == room.id;
+    final revoking = revokingId == room.id;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: p.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: p.line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const CircleAvatar(
+                backgroundColor: Color(0xffe7f2ff),
+                foregroundColor: AndroidPalette.blue,
+                child: Icon(Icons.groups_rounded),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      room.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: p.primary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      'Создана ${_conferenceDate(room.createdAt)}',
+                      style: TextStyle(color: p.secondary, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+              PopupMenuButton<String>(
+                enabled: !opening && !revoking,
+                onSelected: (value) {
+                  if (value == 'copy') unawaited(_copy(room));
+                  if (value == 'revoke') unawaited(_revoke(room));
+                },
+                itemBuilder: (_) => const [
+                  PopupMenuItem(
+                    value: 'copy',
+                    child: ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.content_copy_rounded),
+                      title: Text('Копировать ссылку'),
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'revoke',
+                    child: ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        Icons.link_off_rounded,
+                        color: AndroidPalette.red,
+                      ),
+                      title: Text(
+                        'Аннулировать',
+                        style: TextStyle(color: AndroidPalette.red),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          if (room.inviteUrl.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              room.inviteUrl,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AndroidPalette.blue, fontSize: 11),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: opening || revoking ? null : () => _open(room),
+                  icon: opening
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.login_rounded),
+                  label: const Text('Войти'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filledTonal(
+                tooltip: 'Поделиться',
+                onPressed: room.inviteUrl.isEmpty || opening || revoking
+                    ? null
+                    : () => _share(room),
+                icon: const Icon(Icons.share_rounded),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ConferenceOptions {
+  const _ConferenceOptions({required this.title, required this.allowGuests});
+  final String title;
+  final bool allowGuests;
+}
+
+class _CreateConferenceSheet extends StatefulWidget {
+  const _CreateConferenceSheet();
+
+  @override
+  State<_CreateConferenceSheet> createState() => _CreateConferenceSheetState();
+}
+
+class _CreateConferenceSheetState extends State<_CreateConferenceSheet> {
+  final title = TextEditingController(text: 'Новая конференция');
+  bool allowGuests = true;
+
+  @override
+  void dispose() {
+    title.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = AndroidPalette.of(context);
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        12,
+        20,
+        20 + MediaQuery.viewInsetsOf(context).bottom,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: p.line,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            Text(
+              'Создать комнату',
+              style: TextStyle(
+                color: p.primary,
+                fontSize: 22,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Комната и ссылка сохранятся на сервере. Видеозвонок не начнётся автоматически.',
+              style: TextStyle(color: p.secondary, fontSize: 12),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: title,
+              autofocus: true,
+              maxLength: 120,
+              textInputAction: TextInputAction.done,
+              onChanged: (_) => setState(() {}),
+              decoration: const InputDecoration(
+                labelText: 'Название комнаты',
+                prefixIcon: Icon(Icons.groups_rounded),
+              ),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: allowGuests,
+              onChanged: (value) => setState(() => allowGuests = value),
+              secondary: const Icon(Icons.link_rounded),
+              title: const Text('Разрешить гостевой вход'),
+              subtitle: const Text('Гости смогут войти по ссылке без аккаунта'),
+            ),
+            const SizedBox(height: 12),
+            FilledButton(
+              onPressed: title.text.trim().length < 2
+                  ? null
+                  : () => Navigator.pop(
+                      context,
+                      _ConferenceOptions(
+                        title: title.text.trim(),
+                        allowGuests: allowGuests,
+                      ),
+                    ),
+              child: const Text('Создать комнату'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Отмена'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+String _conferenceDate(DateTime value) {
+  final local = value.toLocal();
+  String two(int number) => number.toString().padLeft(2, '0');
+  return '${two(local.day)}.${two(local.month)}.${local.year} · '
+      '${two(local.hour)}:${two(local.minute)}';
+}
+
 class _Account extends StatelessWidget {
   const _Account({required this.controller});
   final AppController controller;
@@ -1152,9 +1789,11 @@ class _Nav extends StatelessWidget {
             const SizedBox(height: 2),
             Text(
               label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: color,
-                fontSize: 11,
+                fontSize: 9.5,
                 fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
               ),
             ),

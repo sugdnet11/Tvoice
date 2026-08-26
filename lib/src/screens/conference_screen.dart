@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:livekit_client/livekit_client.dart';
 
 import '../controllers/app_controller.dart';
 import '../models/models.dart';
+import '../services/android_platform_bridge.dart';
 
 class ConferenceScreen extends StatefulWidget {
   const ConferenceScreen({
@@ -21,6 +24,7 @@ class ConferenceScreen extends StatefulWidget {
 
 class _ConferenceScreenState extends State<ConferenceScreen> {
   late final Room _room;
+  late final EventsListener<RoomEvent> _roomEvents;
   Timer? _timer;
   Duration _elapsed = Duration.zero;
   bool _connecting = true;
@@ -53,7 +57,11 @@ class _ConferenceScreenState extends State<ConferenceScreen> {
         ),
       ),
     );
+    _muted = !widget.session.initialMicrophone;
+    _cameraOff = !widget.session.initialCamera;
     _room.addListener(_roomChanged);
+    _roomEvents = _room.createListener()
+      ..on<RoomDisconnectedEvent>(_roomDisconnected);
     widget.controller.addListener(_appChanged);
     _connect();
   }
@@ -67,8 +75,8 @@ class _ConferenceScreenState extends State<ConferenceScreen> {
         // advertises 185.177.2.115:443/UDP and retains TCP as a fallback.
         connectOptions: const ConnectOptions(autoSubscribe: true),
       );
-      await _room.localParticipant?.setMicrophoneEnabled(true);
-      await _room.localParticipant?.setCameraEnabled(true);
+      await _room.localParticipant?.setMicrophoneEnabled(!_muted);
+      await _room.localParticipant?.setCameraEnabled(!_cameraOff);
       _markConnectedWhenPeerJoins();
       try {
         await AudioManager.instance.setSpeakerOutputPreferred(true);
@@ -94,6 +102,19 @@ class _ConferenceScreenState extends State<ConferenceScreen> {
     if (mounted) setState(() {});
   }
 
+  void _roomDisconnected(RoomDisconnectedEvent event) {
+    if (_ending || !mounted) return;
+    _ending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final messenger = ScaffoldMessenger.of(context);
+      Navigator.of(context).pop();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Конференция завершена на сервере')),
+      );
+    });
+  }
+
   void _markConnectedWhenPeerJoins() {
     if (_historyConnected || _room.remoteParticipants.isEmpty) return;
     _historyConnected = true;
@@ -101,7 +122,8 @@ class _ConferenceScreenState extends State<ConferenceScreen> {
   }
 
   void _appChanged() {
-    if (widget.controller.lastEndedVideoCallId == widget.session.callId &&
+    if (!widget.session.isConferenceRoom &&
+        widget.controller.lastEndedVideoCallId == widget.session.callId &&
         !_ending) {
       _ending = true;
       _close(notifyPeer: false);
@@ -111,7 +133,9 @@ class _ConferenceScreenState extends State<ConferenceScreen> {
   Future<void> _close({bool notifyPeer = true}) async {
     if (notifyPeer) {
       try {
-        await widget.controller.endVideoCall(widget.session.callId);
+        if (!widget.session.isConferenceRoom) {
+          await widget.controller.endVideoCall(widget.session.callId);
+        }
       } catch (_) {}
     }
     await _room.disconnect();
@@ -119,6 +143,50 @@ class _ConferenceScreenState extends State<ConferenceScreen> {
       await AudioManager.instance.setSpeakerOutputPreferred(false);
     } catch (_) {}
     if (mounted) Navigator.of(context).pop();
+  }
+
+  Future<void> _requestClose() async {
+    if (_ending) return;
+    if (widget.session.isConferenceRoom) {
+      final leave = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Покинуть конференцию?'),
+          content: const Text(
+            'Вы выйдете из разговора, но комната и ссылка останутся '
+            'доступными. Аннулировать комнату можно в разделе «Конференции».',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Отмена'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Выйти'),
+            ),
+          ],
+        ),
+      );
+      if (leave != true) return;
+    }
+    _ending = true;
+    await _close(notifyPeer: !widget.session.isConferenceRoom);
+  }
+
+  Future<void> _shareInvite() async {
+    final invite = widget.session.inviteUrl;
+    if (invite == null || invite.isEmpty) return;
+    final shared = await AndroidPlatformBridge.shareText(
+      text: '${widget.session.title ?? 'Конференция Tvoice'}\n$invite',
+      title: 'Приглашение в Tvoice',
+    );
+    if (shared || !mounted) return;
+    await Clipboard.setData(ClipboardData(text: invite));
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Ссылка скопирована')));
+    }
   }
 
   Future<void> _toggleMicrophone() async {
@@ -154,6 +222,7 @@ class _ConferenceScreenState extends State<ConferenceScreen> {
     _timer?.cancel();
     widget.controller.removeListener(_appChanged);
     _room.removeListener(_roomChanged);
+    unawaited(_roomEvents.dispose());
     unawaited(_room.dispose().then((_) {}));
     super.dispose();
   }
@@ -163,10 +232,7 @@ class _ConferenceScreenState extends State<ConferenceScreen> {
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop && !_ending) {
-          _ending = true;
-          _close();
-        }
+        if (!didPop) unawaited(_requestClose());
       },
       child: Scaffold(
         backgroundColor: const Color(0xff080b10),
@@ -199,12 +265,7 @@ class _ConferenceScreenState extends State<ConferenceScreen> {
                 child: Row(
                   children: [
                     IconButton.filledTonal(
-                      onPressed: () {
-                        if (!_ending) {
-                          _ending = true;
-                          _close();
-                        }
-                      },
+                      onPressed: _requestClose,
                       icon: const Icon(Icons.keyboard_arrow_down_rounded),
                     ),
                     const SizedBox(width: 10),
@@ -213,7 +274,8 @@ class _ConferenceScreenState extends State<ConferenceScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            widget.session.peer.displayName,
+                            widget.session.title ??
+                                widget.session.peer.displayName,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -232,6 +294,12 @@ class _ConferenceScreenState extends State<ConferenceScreen> {
                         ],
                       ),
                     ),
+                    if (widget.session.inviteUrl?.isNotEmpty == true)
+                      IconButton.filledTonal(
+                        tooltip: 'Поделиться ссылкой',
+                        onPressed: _shareInvite,
+                        icon: const Icon(Icons.person_add_alt_1_rounded),
+                      ),
                   ],
                 ),
               ),
@@ -276,12 +344,7 @@ class _ConferenceScreenState extends State<ConferenceScreen> {
                           ),
                           const SizedBox(width: 4),
                           IconButton.filled(
-                            onPressed: () {
-                              if (!_ending) {
-                                _ending = true;
-                                _close();
-                              }
-                            },
+                            onPressed: _requestClose,
                             style: IconButton.styleFrom(
                               backgroundColor: const Color(0xffee344e),
                               foregroundColor: Colors.white,
@@ -305,26 +368,66 @@ class _ConferenceScreenState extends State<ConferenceScreen> {
   Widget _buildVideoStage() {
     final local = _room.localParticipant;
     final remotes = _room.remoteParticipants.values.toList();
-    final participants = <Participant>[?local, ...remotes];
+    final participants = <Participant>[...remotes, ?local];
 
-    if (participants.length >= 3) {
-      final columns = participants.length <= 4
-          ? 2
-          : participants.length <= 9
-          ? 3
-          : 4;
-      return GridView.builder(
-        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: columns,
-          crossAxisSpacing: 7,
-          mainAxisSpacing: 7,
-          childAspectRatio: 1,
-        ),
-        itemCount: participants.length,
-        itemBuilder: (_, index) => _ParticipantTile(
-          participant: participants[index],
-          local: participants[index] == local,
-        ),
+    if (widget.session.isConferenceRoom || participants.length >= 3) {
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final count = participants.length;
+          if (count == 0) {
+            return _WaitingForParticipant(peer: widget.session.peer);
+          }
+          final aspect = constraints.maxWidth / constraints.maxHeight;
+          final columns = math.sqrt(count * aspect).ceil().clamp(1, count);
+          final rowCount = (count / columns).ceil();
+          final baseRowSize = count ~/ rowCount;
+          final widerRows = count % rowCount;
+          final rowSizes = [
+            for (var row = 0; row < rowCount; row++)
+              baseRowSize + (row < widerRows ? 1 : 0),
+          ];
+          final maxColumns = rowSizes.reduce(math.max);
+          final rowStarts = <int>[];
+          var offset = 0;
+          for (final size in rowSizes) {
+            rowStarts.add(offset);
+            offset += size;
+          }
+          return Column(
+            children: [
+              for (var row = 0; row < rowSizes.length; row++)
+                Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.only(
+                      bottom: row == rowSizes.length - 1 ? 0 : 3.5,
+                    ),
+                    child: FractionallySizedBox(
+                      widthFactor: rowSizes[row] / maxColumns,
+                      child: Row(
+                        children: [
+                          for (var column = 0; column < rowSizes[row]; column++)
+                            Expanded(
+                              child: Padding(
+                                padding: EdgeInsets.only(
+                                  right: column == rowSizes[row] - 1 ? 0 : 3.5,
+                                ),
+                                child: _ParticipantTile(
+                                  participant:
+                                      participants[rowStarts[row] + column],
+                                  local:
+                                      participants[rowStarts[row] + column] ==
+                                      local,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
       );
     }
 
@@ -539,8 +642,9 @@ class _ParticipantTileState extends State<_ParticipantTile> {
               ),
             ),
           Positioned(
-            left: 9,
-            bottom: 9,
+            left: 7,
+            right: 7,
+            bottom: 7,
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 180),
               decoration: BoxDecoration(
@@ -551,7 +655,6 @@ class _ParticipantTileState extends State<_ParticipantTile> {
               ),
               padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
               child: Row(
-                mainAxisSize: MainAxisSize.min,
                 children: [
                   if (speaking) ...[
                     const Icon(
@@ -561,12 +664,18 @@ class _ParticipantTileState extends State<_ParticipantTile> {
                     ),
                     const SizedBox(width: 4),
                   ],
-                  Text(
-                    widget.local ? '$name · Вы' : name,
-                    style: TextStyle(
-                      color: speaking ? const Color(0xff06150f) : Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
+                  Expanded(
+                    child: Text(
+                      widget.local ? '$name · Вы' : name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: speaking
+                            ? const Color(0xff06150f)
+                            : Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                   ),
                 ],

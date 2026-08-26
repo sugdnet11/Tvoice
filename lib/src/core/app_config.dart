@@ -1,6 +1,6 @@
 abstract final class AppConfig {
   static const appName = 'Tvoice';
-  static const version = '0.17.9';
+  static const version = '0.17.11';
   static const apiBaseUrl = 'https://chat.185-177-2-115.sslip.io';
   static const sipHost = '185.177.2.115';
   static const sipPort = 5060;

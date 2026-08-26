@@ -172,17 +172,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<VideoCallSession> startVideoCall(TvoiceUser peer) async {
-    if (Platform.isAndroid) {
-      final permissions = await [
-        Permission.microphone,
-        Permission.camera,
-      ].request();
-      if (permissions.values.any((status) => !status.isGranted)) {
-        throw const ApiException(
-          'Для видеозвонка нужен доступ к камере и микрофону',
-        );
-      }
-    }
+    await _ensureVideoPermissions();
     final session = await api.startVideoCall(peer.sipNumber);
     _beginVideoHistory(session, CallDirection.outgoing);
     return session;
@@ -194,6 +184,7 @@ class AppController extends ChangeNotifier {
     required bool cameraEnabled,
     required bool microphoneEnabled,
   }) async {
+    await _ensureVideoPermissions();
     final current = user;
     if (current == null) throw const ApiException('Сеанс авторизации завершён');
     return api.createConference(
@@ -216,6 +207,7 @@ class AppController extends ChangeNotifier {
   }) => api.createConferenceRoom(title: title, allowGuests: allowGuests);
 
   Future<VideoCallSession> openConferenceRoom(ConferenceRoom room) async {
+    await _ensureVideoPermissions();
     final current = user;
     if (current == null) throw const ApiException('Сеанс авторизации завершён');
     return api.openConferenceRoom(room.id, current);
@@ -225,9 +217,23 @@ class AppController extends ChangeNotifier {
       api.revokeConferenceRoom(conferenceId);
 
   Future<VideoCallSession> joinConference(String inviteToken) async {
+    await _ensureVideoPermissions();
     final current = user;
     if (current == null) throw const ApiException('Сначала войдите в Tvoice');
     return api.joinConference(inviteToken, current);
+  }
+
+  Future<void> _ensureVideoPermissions() async {
+    if (!Platform.isAndroid) return;
+    final permissions = await [
+      Permission.microphone,
+      Permission.camera,
+    ].request();
+    if (permissions.values.any((status) => !status.isGranted)) {
+      throw const ApiException(
+        'Для видеосвязи нужен доступ к камере и микрофону',
+      );
+    }
   }
 
   Future<bool> startAudioCall(String number) async {

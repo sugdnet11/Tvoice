@@ -74,4 +74,85 @@ void main() {
     expect(answerRequest.headers.containsKey('content-type'), isFalse);
     expect(answerRequest.body, isEmpty);
   });
+
+  test('persistent conference room is created without auto-joining', () async {
+    late http.Request createRequest;
+    final api = ApiClient(
+      client: MockClient((request) async {
+        createRequest = request;
+        return http.Response(
+          jsonEncode({
+            'conference': {
+              'id': 'room-1',
+              'title': 'Команда',
+              'inviteUrl': 'https://chat.example/conference/join/token-1',
+              'createdAt': '2026-08-26T08:00:00Z',
+              'allowGuests': true,
+              'active': true,
+            },
+          }),
+          201,
+          headers: {'content-type': 'application/json'},
+        );
+      }),
+    )..accessToken = 'test-token';
+
+    final room = await api.createConferenceRoom(
+      title: 'Команда',
+      allowGuests: true,
+    );
+
+    expect(createRequest.method, 'POST');
+    expect(createRequest.url.path, '/v1/conferences');
+    expect(jsonDecode(createRequest.body), {
+      'title': 'Команда',
+      'allowGuests': true,
+      'cameraEnabled': true,
+      'microphoneEnabled': true,
+    });
+    expect(room.id, 'room-1');
+    expect(room.inviteUrl, endsWith('/token-1'));
+  });
+
+  test('saved conference room can be joined and revoked', () async {
+    final requests = <http.Request>[];
+    final api = ApiClient(
+      client: MockClient((request) async {
+        requests.add(request);
+        if (request.url.path == '/v1/conferences/room-1/join') {
+          return http.Response(
+            jsonEncode({
+              'conference': {
+                'id': 'room-1',
+                'title': 'Команда',
+                'role': 'organizer',
+                'url': 'wss://video.example',
+                'token': 'livekit-token',
+                'inviteUrl': 'https://chat.example/conference/join/token-1',
+              },
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }
+        return http.Response('', 204);
+      }),
+    )..accessToken = 'test-token';
+    const user = TvoiceUser(
+      id: 'user-1',
+      sipNumber: '73302',
+      displayName: '73302',
+    );
+
+    final session = await api.openConferenceRoom('room-1', user);
+    await api.revokeConferenceRoom('room-1');
+
+    expect(session.isConferenceRoom, isTrue);
+    expect(session.isReady, isTrue);
+    expect(session.role, 'organizer');
+    expect(requests.map((request) => request.url.path), [
+      '/v1/conferences/room-1/join',
+      '/v1/conferences/room-1/revoke',
+    ]);
+  });
 }
