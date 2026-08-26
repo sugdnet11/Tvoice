@@ -105,6 +105,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           name: Tvoice Windows 0.17.10
+          prerelease: true
           body: |
             Platform branch: windows
             Source commit: ${{ github.sha }}

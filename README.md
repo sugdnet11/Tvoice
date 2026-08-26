@@ -1,8 +1,11 @@
 # Tvoice for Windows
 
-**Версия:** 0.17.10+32  
-**Статус:** Beta — проверенная Release-сборка без цифровой подписи  
-**Последняя стабильная сборка:** 25 августа 2026 года  
+**Версия:** 0.17.10+32
+
+**Статус:** Beta — проверенная Release-сборка без цифровой подписи
+
+**Последняя проверенная сборка:** 25 августа 2026 года
+
 **Скачать последнюю версию:** [Tvoice Windows 0.17.10](https://github.com/sugdnet11/Tvoice/releases/tag/windows-v0.17.10)
 
 Desktop-клиент Tvoice с отдельным интерфейсом Windows, SIP-аудиозвонками,
@@ -39,7 +42,6 @@ Desktop-клиент Tvoice с отдельным интерфейсом Windows
 
 | Платформа | Ветка | Последняя версия | Скачать | Статус |
 | --- | --- | --- | --- | --- |
-| Android | `android` | 0.17.10+32 | Ожидает подтверждения production signing | Release Candidate |
+| Android | `android` | 0.17.10+32 | — | Release blocked: wrong signing key |
 | iOS | `ios` | — | — | Ожидается загрузка с MacBook |
 | Windows | `windows` | 0.17.10+32 | [Setup x64](https://github.com/sugdnet11/Tvoice/releases/tag/windows-v0.17.10) | Beta / Unsigned |
-
