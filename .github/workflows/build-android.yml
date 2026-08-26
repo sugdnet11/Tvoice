@@ -120,8 +120,8 @@ jobs:
           path: release-output
       - uses: softprops/action-gh-release@v2
         with:
-          name: Tvoice Android 0.17.10
-          prerelease: true
+          name: Tvoice Android 0.17.11
+          prerelease: false
           body: |
             Platform branch: android
             Source commit: ${{ github.sha }}
