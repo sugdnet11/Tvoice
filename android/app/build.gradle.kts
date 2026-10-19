@@ -30,12 +30,10 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "tj.tvoice.app"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = 24
-        targetSdk = flutter.targetSdkVersion
+        // Google Play requires API 36 for new apps and updates from 31 August 2026.
+        targetSdk = 36
         // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
         // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
         // You can force using the value of versionCode by specifying the `-P force-version-code-ignoring-abi=true`
@@ -57,9 +55,12 @@ android {
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName(
-                if (hasPermanentSigning) "tvoicePermanent" else "debug",
-            )
+            if (!hasPermanentSigning) {
+                throw GradleException(
+                    "Release signing is not configured. Set the four TVOICE_SIGNING_* environment variables.",
+                )
+            }
+            signingConfig = signingConfigs.getByName("tvoicePermanent")
         }
     }
 }
