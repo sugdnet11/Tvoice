@@ -23,6 +23,7 @@ import { SignJWT, jwtVerify } from "jose";
 import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
 import pg from "pg";
 import { z } from "zod";
+import { dataDeletionHtml, partnerPortalHtml, privacyHtml } from "./portal.js";
 
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
@@ -528,9 +529,21 @@ app.get("/health", async (_request, reply) => {
   return reply.send({
     status: "ok",
     service: "tvoice-chat",
-    version: "0.6.0",
+    version: "0.6.1",
     video: liveKitConfigured() ? "ready" : "disabled",
   });
+});
+
+app.get("/partner", async (_request, reply) => {
+  return reply.type("text/html; charset=utf-8").send(partnerPortalHtml());
+});
+
+app.get("/privacy", async (_request, reply) => {
+  return reply.type("text/html; charset=utf-8").send(privacyHtml());
+});
+
+app.get("/data-deletion", async (_request, reply) => {
+  return reply.type("text/html; charset=utf-8").send(dataDeletionHtml());
 });
 
 app.get("/v1/tenants/:code", async (request, reply) => {
@@ -899,6 +912,28 @@ app.get(
       `SELECT * FROM tenants ORDER BY name, code`,
     );
     return reply.send({ companies: result.rows.map(companyPayload) });
+  },
+);
+
+app.post(
+  "/v1/admin/tenants/:code/rotate-partner-key",
+  { preHandler: requireAdmin, config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+  async (request, reply) => {
+    const parsed = z.string().trim().min(2).max(40).regex(/^[A-Za-z0-9_-]+$/)
+      .safeParse((request.params as { code?: string }).code);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_request" });
+    const partnerKey = randomBytes(32).toString("base64url");
+    const result = await pool.query<TenantRow>(
+      `UPDATE tenants SET partner_key_hash = $1, updated_at = now()
+       WHERE code = $2 RETURNING *`,
+      [opaqueKeyHash(partnerKey), parsed.data.toUpperCase()],
+    );
+    if (!result.rows[0]) return reply.code(404).send({ error: "tenant_not_found" });
+    return reply.send({
+      company: companyPayload(result.rows[0]),
+      partnerKey,
+      warning: "Сохраните partnerKey сейчас: предыдущий ключ больше не действует",
+    });
   },
 );
 
