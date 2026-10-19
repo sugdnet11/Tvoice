@@ -1,6 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../controllers/app_controller.dart';
+import '../core/app_config.dart';
+import '../models/models.dart';
+import '../services/android_platform_bridge.dart';
 import '../widgets/android_brand.dart';
 
 class AndroidLoginScreen extends StatefulWidget {
@@ -14,18 +19,120 @@ class AndroidLoginScreen extends StatefulWidget {
 class _AndroidLoginScreenState extends State<AndroidLoginScreen> {
   final number = TextEditingController();
   final password = TextEditingController();
+  CompanyProfile company = const CompanyProfile(
+    id: '00000000-0000-0000-0000-000000000001',
+    code: 'TOJIKTELECOM',
+    name: 'Tojiktelecom',
+    sip: SipProfile(host: AppConfig.sipHost, port: AppConfig.sipPort),
+  );
   bool hidden = true;
+  bool resolvingCompany = false;
+  String? companyError;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(AndroidPlatformBridge.initialize(onLink: _handleLink));
+    unawaited(_resolveCompany(company.code, silent: true));
+  }
 
   @override
   void dispose() {
     number.dispose();
     password.dispose();
+    AndroidPlatformBridge.dispose();
     super.dispose();
+  }
+
+  Future<void> _handleLink(Uri uri) async {
+    final code = CompanyLink.companyCode(uri);
+    if (code != null) await _resolveCompany(code);
+  }
+
+  Future<bool> _resolveCompany(String code, {bool silent = false}) async {
+    if (resolvingCompany) return false;
+    setState(() {
+      resolvingCompany = true;
+      companyError = null;
+    });
+    try {
+      final resolved = await widget.controller.resolveCompany(code);
+      if (!mounted) return false;
+      setState(() => company = resolved);
+      return true;
+    } catch (error) {
+      if (!mounted) return false;
+      if (!silent) setState(() => companyError = error.toString());
+      return false;
+    } finally {
+      if (mounted) setState(() => resolvingCompany = false);
+    }
+  }
+
+  Future<void> _chooseCompany() async {
+    final code = TextEditingController();
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => Padding(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          4,
+          20,
+          MediaQuery.viewInsetsOf(context).bottom + 24,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Подключение компании',
+              style: Theme.of(context).textTheme.titleLarge
+                  ?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Введите код, выданный администратором компании. SIP, чат и видео подключатся автоматически.',
+            ),
+            const SizedBox(height: 18),
+            TextField(
+              controller: code,
+              autofocus: true,
+              textCapitalization: TextCapitalization.characters,
+              decoration: const InputDecoration(
+                labelText: 'Код компании',
+                hintText: 'Например, COMPANY01',
+                prefixIcon: Icon(Icons.business_rounded),
+              ),
+              onSubmitted: (value) => Navigator.pop(context, value),
+            ),
+            const SizedBox(height: 14),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, code.text),
+              child: const Text('Продолжить'),
+            ),
+            TextButton.icon(
+              onPressed: () => Navigator.pop(context, 'TOJIKTELECOM'),
+              icon: const Icon(Icons.apartment_rounded),
+              label: const Text('Использовать Tojiktelecom'),
+            ),
+          ],
+        ),
+      ),
+    );
+    code.dispose();
+    if (selected == null || selected.trim().isEmpty) return;
+    await _resolveCompany(selected.trim().toUpperCase());
   }
 
   Future<void> submit() async {
     FocusScope.of(context).unfocus();
-    await widget.controller.login(number.text.trim(), password.text);
+    await widget.controller.login(
+      number.text.trim(),
+      password.text,
+      tenantCode: company.code,
+    );
   }
 
   @override
@@ -48,7 +155,10 @@ class _AndroidLoginScreenState extends State<AndroidLoginScreen> {
               child: AutofillGroup(
                 child: Column(
                   children: [
-                    const TojiktelecomBrand(compact: true),
+                    if (company.code == 'TOJIKTELECOM')
+                      const TojiktelecomBrand()
+                    else
+                      _CompanyBrand(company: company),
                     const SizedBox(height: 18),
                     Container(
                       width: 72,
@@ -82,10 +192,79 @@ class _AndroidLoginScreenState extends State<AndroidLoginScreen> {
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      'Один вход для звонков и чата',
+                      'Один вход для звонков, чата и видео',
                       style: TextStyle(color: secondary, fontSize: 14),
                     ),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: 20),
+                    Material(
+                      color: surface,
+                      borderRadius: BorderRadius.circular(14),
+                      child: InkWell(
+                        onTap: resolvingCompany ? null : _chooseCompany,
+                        borderRadius: BorderRadius.circular(14),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 12,
+                          ),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: line),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.business_rounded,
+                                color: Color(0xff0a84ff),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      company.name,
+                                      style: TextStyle(
+                                        color: primary,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                    Text(
+                                      'Код: ${company.code}',
+                                      style: TextStyle(
+                                        color: secondary,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (resolvingCompany)
+                                const SizedBox.square(
+                                  dimension: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              else
+                                const Icon(Icons.chevron_right_rounded),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (companyError != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        companyError!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Color(0xffff3b30),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 18),
                     _Field(
                       controller: number,
                       label: 'SIP-номер',
@@ -156,6 +335,35 @@ class _AndroidLoginScreenState extends State<AndroidLoginScreen> {
       ),
     );
   }
+}
+
+class _CompanyBrand extends StatelessWidget {
+  const _CompanyBrand({required this.company});
+  final CompanyProfile company;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    children: [
+      if (company.logoUrl != null && company.logoUrl!.isNotEmpty)
+        Image.network(
+          company.logoUrl!,
+          height: 62,
+          fit: BoxFit.contain,
+          errorBuilder: (_, _, _) => const Icon(
+            Icons.apartment_rounded,
+            size: 54,
+            color: Color(0xff0a84ff),
+          ),
+        )
+      else
+        const Icon(Icons.apartment_rounded, size: 54, color: Color(0xff0a84ff)),
+      const SizedBox(height: 6),
+      Text(
+        company.name,
+        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+      ),
+    ],
+  );
 }
 
 class _Field extends StatelessWidget {

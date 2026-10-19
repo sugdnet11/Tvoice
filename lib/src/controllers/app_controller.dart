@@ -32,6 +32,7 @@ class AppController extends ChangeNotifier {
   final SipBridge sip;
 
   TvoiceUser? user;
+  CompanyProfile? company;
   List<TvoiceUser> contacts = const [];
   List<Conversation> conversations = const [];
   List<CallHistoryEntry> callHistory = const [];
@@ -73,7 +74,8 @@ class AppController extends ChangeNotifier {
       if (stored == null) return;
       api.accessToken = stored.accessToken;
       user = await api.me();
-      await _afterLogin(stored.sipNumber, stored.password);
+      company = await api.resolveCompany(stored.tenantCode);
+      await _afterLogin(stored.sipNumber, stored.password, company!.sip);
     } catch (_) {
       await logout();
       error = 'Не удалось восстановить сессию. Войдите снова.';
@@ -83,21 +85,34 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<bool> login(String sipNumber, String password) async {
+  Future<CompanyProfile> resolveCompany(String code) =>
+      api.resolveCompany(code);
+
+  Future<bool> login(
+    String sipNumber,
+    String password, {
+    String tenantCode = 'TOJIKTELECOM',
+  }) async {
     busy = true;
     error = null;
     notifyListeners();
     try {
-      final result = await api.login(sipNumber.trim(), password);
+      final result = await api.login(
+        tenantCode.trim().toUpperCase(),
+        sipNumber.trim(),
+        password,
+      );
       user = result.user;
+      company = result.company;
       await sessionStore.write(
         StoredSession(
+          tenantCode: result.company.code,
           sipNumber: sipNumber.trim(),
           password: password,
           accessToken: result.accessToken,
         ),
       );
-      await _afterLogin(sipNumber.trim(), password);
+      await _afterLogin(sipNumber.trim(), password, result.company.sip);
       return true;
     } on ApiException catch (exception) {
       error = exception.message;
@@ -111,7 +126,11 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> _afterLogin(String sipNumber, String password) async {
+  Future<void> _afterLogin(
+    String sipNumber,
+    String password,
+    SipProfile sipProfile,
+  ) async {
     sipState = SipRegistrationState.connecting;
     notifyListeners();
     try {
@@ -130,8 +149,10 @@ class AppController extends ChangeNotifier {
     sipState = await sip.register(
       number: sipNumber,
       password: password,
-      host: AppConfig.sipHost,
-      port: AppConfig.sipPort,
+      host: sipProfile.host,
+      port: sipProfile.port,
+      transport: sipProfile.transport,
+      outboundProxy: sipProfile.outboundProxy,
     );
     notifyListeners();
   }
@@ -347,6 +368,7 @@ class AppController extends ChangeNotifier {
     _webSocket = null;
     api.accessToken = null;
     user = null;
+    company = null;
     contacts = const [];
     conversations = const [];
     callHistory = const [];

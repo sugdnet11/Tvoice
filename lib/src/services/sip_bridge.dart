@@ -63,6 +63,8 @@ class SipBridge {
     required String password,
     required String host,
     required int port,
+    String transport = 'udp',
+    String? outboundProxy,
   }) async {
     if (Platform.isWindows) {
       try {
@@ -71,7 +73,8 @@ class SipBridge {
           'password': password,
           'host': host,
           'port': port,
-          'transport': 'udp',
+          'transport': transport,
+          'outboundProxy': ?outboundProxy,
         });
         return ok == true
             ? SipRegistrationState.connecting
@@ -86,7 +89,8 @@ class SipBridge {
         'password': password,
         'host': host,
         'port': port,
-        'transport': 'udp',
+        'transport': transport,
+        'outboundProxy': ?outboundProxy,
       });
       return ok == true
           ? SipRegistrationState.registered

@@ -26,8 +26,19 @@ class SipManager(context: Context, private val observer: Observer) {
     private var lastRemote = ""
     private var core = createCore()
 
-    fun login(username: String, password: String) {
+    fun login(
+        username: String,
+        password: String,
+        host: String,
+        port: Int,
+        transport: String,
+    ) {
         accounts.clear()
+        if (SipConfig.configure(host, port, transport)) {
+            coreGeneration += 1
+            core.close()
+            core = createCore()
+        }
         addAccount(username, password)
     }
 

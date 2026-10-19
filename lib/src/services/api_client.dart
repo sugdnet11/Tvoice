@@ -15,9 +15,14 @@ class ApiException implements Exception {
 }
 
 class LoginResult {
-  const LoginResult({required this.accessToken, required this.user});
+  const LoginResult({
+    required this.accessToken,
+    required this.user,
+    required this.company,
+  });
   final String accessToken;
   final TvoiceUser user;
+  final CompanyProfile company;
 }
 
 class ApiClient {
@@ -32,11 +37,28 @@ class ApiClient {
     if (accessToken != null) 'authorization': 'Bearer $accessToken',
   };
 
-  Future<LoginResult> login(String sipNumber, String password) async {
+  Future<CompanyProfile> resolveCompany(String companyCode) async {
+    final data = await _request(
+      'GET',
+      '/v1/tenants/${Uri.encodeComponent(companyCode.trim())}',
+      authenticated: false,
+    );
+    return CompanyProfile.fromJson(data['company'] as Map<String, dynamic>);
+  }
+
+  Future<LoginResult> login(
+    String companyCode,
+    String sipNumber,
+    String password,
+  ) async {
     final data = await _request(
       'POST',
       '/v1/auth/login',
-      body: {'sipNumber': sipNumber, 'password': password},
+      body: {
+        'tenantCode': companyCode,
+        'sipNumber': sipNumber,
+        'password': password,
+      },
       authenticated: false,
     );
     final token = data['accessToken']?.toString() ?? '';
@@ -44,6 +66,7 @@ class ApiClient {
     return LoginResult(
       accessToken: token,
       user: TvoiceUser.fromJson(data['user'] as Map<String, dynamic>),
+      company: CompanyProfile.fromJson(data['company'] as Map<String, dynamic>),
     );
   }
 
@@ -281,7 +304,9 @@ class ApiClient {
 
   String _friendlyError(String? code) => switch (code) {
     'invalid_credentials' => 'Неверный номер или пароль',
-    'auth_provider_unavailable' => 'FreePBX временно недоступен',
+    'auth_provider_unavailable' => 'Сервер авторизации компании недоступен',
+    'tenant_not_found' => 'Компания не найдена или ещё не подключена к Tvoice',
+    'tenant_inactive' => 'Подключение компании временно отключено',
     'contact_not_found' => 'Абонент не найден',
     'video_unavailable' => 'Сервер видеосвязи временно недоступен',
     'call_not_found' => 'Вызов уже завершён',

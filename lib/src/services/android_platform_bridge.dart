@@ -55,3 +55,11 @@ abstract final class ConferenceLink {
     return token == null || token.isEmpty ? null : token;
   }
 }
+
+abstract final class CompanyLink {
+  static String? companyCode(Uri uri) {
+    if (uri.scheme != 'tvoice' || uri.host != 'company') return null;
+    final code = uri.queryParameters['code']?.trim().toUpperCase();
+    return code == null || code.isEmpty ? null : code;
+  }
+}

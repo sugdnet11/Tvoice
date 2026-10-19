@@ -74,7 +74,10 @@ class MainActivity : FlutterActivity() {
                 "register" -> {
                     val number = call.argument<String>("number").orEmpty()
                     val password = call.argument<String>("password").orEmpty()
-                    FlutterSipRuntime.register(number, password)
+                    val host = call.argument<String>("host").orEmpty()
+                    val port = call.argument<Int>("port") ?: 5060
+                    val transport = call.argument<String>("transport") ?: "udp"
+                    FlutterSipRuntime.register(number, password, host, port, transport)
                     result.success(true)
                 }
 

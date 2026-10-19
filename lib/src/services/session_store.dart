@@ -7,17 +7,20 @@ import '../models/models.dart';
 
 class StoredSession {
   const StoredSession({
+    required this.tenantCode,
     required this.sipNumber,
     required this.password,
     required this.accessToken,
   });
 
+  final String tenantCode;
   final String sipNumber;
   final String password;
   final String accessToken;
 }
 
 class SessionStore {
+  static const _tenantKey = 'session.tenantCode';
   static const _sipKey = 'session.sipNumber';
   static const _passwordKey = 'session.password';
   static const _tokenKey = 'session.accessToken';
@@ -31,11 +34,13 @@ class SessionStore {
 
   Future<StoredSession?> read() async {
     final values = await _storage.readAll();
+    final tenant = values[_tenantKey] ?? 'TOJIKTELECOM';
     final sip = values[_sipKey];
     final password = values[_passwordKey];
     final token = values[_tokenKey];
     if (sip == null || password == null || token == null) return null;
     return StoredSession(
+      tenantCode: tenant,
       sipNumber: sip,
       password: password,
       accessToken: token,
@@ -44,6 +49,7 @@ class SessionStore {
 
   Future<void> write(StoredSession session) async {
     await Future.wait([
+      _storage.write(key: _tenantKey, value: session.tenantCode),
       _storage.write(key: _sipKey, value: session.sipNumber),
       _storage.write(key: _passwordKey, value: session.password),
       _storage.write(key: _tokenKey, value: session.accessToken),

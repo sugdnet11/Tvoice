@@ -17,6 +17,56 @@ class TvoiceUser {
   );
 }
 
+class SipProfile {
+  const SipProfile({
+    required this.host,
+    required this.port,
+    this.transport = 'udp',
+    this.outboundProxy,
+  });
+
+  final String host;
+  final int port;
+  final String transport;
+  final String? outboundProxy;
+
+  factory SipProfile.fromJson(Map<String, dynamic> json) => SipProfile(
+    host: json['host']?.toString() ?? '',
+    port: int.tryParse(json['port']?.toString() ?? '') ?? 5060,
+    transport: json['transport']?.toString().toLowerCase() ?? 'udp',
+    outboundProxy: json['outboundProxy']?.toString(),
+  );
+}
+
+class CompanyProfile {
+  const CompanyProfile({
+    required this.id,
+    required this.code,
+    required this.name,
+    required this.sip,
+    this.logoUrl,
+    this.primaryColor = '#0A84FF',
+  });
+
+  final String id;
+  final String code;
+  final String name;
+  final String? logoUrl;
+  final String primaryColor;
+  final SipProfile sip;
+
+  factory CompanyProfile.fromJson(Map<String, dynamic> json) => CompanyProfile(
+    id: json['id']?.toString() ?? '',
+    code: json['code']?.toString() ?? '',
+    name: json['name']?.toString() ?? '',
+    logoUrl: json['logoUrl']?.toString(),
+    primaryColor: json['primaryColor']?.toString() ?? '#0A84FF',
+    sip: SipProfile.fromJson(
+      (json['sip'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+    ),
+  );
+}
+
 class Conversation {
   const Conversation({required this.id, required this.peer, this.lastMessage});
 

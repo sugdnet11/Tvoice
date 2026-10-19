@@ -20,4 +20,9 @@ void main() {
       isNull,
     );
   });
+
+  test('company deep link selects the tenant code', () {
+    final uri = Uri.parse('tvoice://company?code=company01');
+    expect(CompanyLink.companyCode(uri), 'COMPANY01');
+  });
 }

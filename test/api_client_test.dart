@@ -7,6 +7,52 @@ import 'package:tvoice_flutter/src/models/models.dart';
 import 'package:tvoice_flutter/src/services/api_client.dart';
 
 void main() {
+  test('company profile is resolved before tenant login', () async {
+    final requests = <http.Request>[];
+    final api = ApiClient(
+      client: MockClient((request) async {
+        requests.add(request);
+        final company = {
+          'id': 'tenant-1',
+          'code': 'COMPANY01',
+          'name': 'Компания 01',
+          'sip': {'host': 'sip.company.test', 'port': 5060, 'transport': 'udp'},
+        };
+        if (request.url.path == '/v1/tenants/COMPANY01') {
+          return http.Response(
+            jsonEncode({'company': company}),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }
+        return http.Response(
+          jsonEncode({
+            'accessToken': 'token',
+            'user': {
+              'id': 'user-1',
+              'sipNumber': '75566',
+              'displayName': 'Абонент',
+            },
+            'company': company,
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }),
+    );
+
+    final company = await api.resolveCompany('COMPANY01');
+    final login = await api.login('COMPANY01', '75566', 'secret');
+
+    expect(company.sip.host, 'sip.company.test');
+    expect(login.company.code, 'COMPANY01');
+    expect(jsonDecode(requests.last.body), {
+      'tenantCode': 'COMPANY01',
+      'sipNumber': '75566',
+      'password': 'secret',
+    });
+  });
+
   test('video call fails clearly when invite was not delivered', () async {
     final requests = <http.Request>[];
     final api = ApiClient(

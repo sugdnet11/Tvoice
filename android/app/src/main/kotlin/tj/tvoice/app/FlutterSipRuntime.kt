@@ -38,7 +38,13 @@ object FlutterSipRuntime : SipManager.Observer, EventChannel.StreamHandler {
     }
 
     @Synchronized
-    fun register(number: String, password: String) {
+    fun register(
+        number: String,
+        password: String,
+        host: String,
+        port: Int,
+        transport: String,
+    ) {
         require(number.isNotBlank()) { "Введите SIP-номер" }
         require(password.isNotBlank()) { "Введите пароль" }
         registrationState = RegistrationState.Progress
@@ -49,7 +55,7 @@ object FlutterSipRuntime : SipManager.Observer, EventChannel.StreamHandler {
                 Intent(context, FlutterSipService::class.java),
             )
         }
-        requireManager().login(number, password)
+        requireManager().login(number, password, host, port, transport)
     }
 
     fun call(number: String) {
