@@ -13,6 +13,8 @@
 - Docker Compose
 - вложения до 20 МБ в отдельном Docker volume
 - сигналинг видеозвонков для собственного LiveKit
+- multi-tenant изоляция компаний, пользователей, чатов и видеовызовов
+- provisioning компаний по коду и партнёрский каталог абонентов
 
 ## Безопасность
 
@@ -67,6 +69,37 @@ curl http://127.0.0.1/health
 
 При включённых `FREEPBX_AUTH_URL` и `FREEPBX_API_KEY` каталог загружается при старте,
 каждые пять минут и после успешного входа. Ручное создание пользователя не требуется.
+
+## Подключение других компаний
+
+1. Администратор Tvoice создаёт tenant через `POST /v1/admin/tenants`.
+2. API возвращает одноразово `partnerKey`; его нужно передать компании безопасным каналом.
+3. Компания входит на `/partner`, проверяет SIP-профиль и синхронизирует каталог без паролей.
+4. Пользователь вводит код компании и свои обычные SIP-данные в приложении.
+5. Tvoice проверяет пароль через webhook компании, после чего автоматически выдаёт токены чата и LiveKit.
+
+Для webhook-компаний задайте `TENANT_SECRETS_KEY` как 64 шестнадцатеричных
+символа (`openssl rand -hex 32`). Секрет webhook хранится в PostgreSQL только в
+зашифрованном AES-256-GCM виде. Пароли SIP-пользователей в Tvoice не сохраняются.
+
+Пример создания компании:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/admin/tenants \
+  -H "x-admin-key: $ADMIN_KEY" -H "content-type: application/json" \
+  -d '{
+    "code":"COMPANY01","slug":"company-01","name":"Компания 01",
+    "sip":{"host":"sip.company.example","port":5060,"transport":"udp"},
+    "auth":{"type":"webhook","url":"https://company.example/tvoice/auth","sharedSecret":"CHANGE_TO_32_CHAR_SECRET_OR_LONGER"}
+  }'
+```
+
+Webhook компании принимает `tenantCode`, `sipNumber`, `password` и при успешной
+проверке возвращает:
+
+```json
+{"user":{"sipNumber":"75566","displayName":"Фарид Усманов"}}
+```
 
 ## Проверка входа
 

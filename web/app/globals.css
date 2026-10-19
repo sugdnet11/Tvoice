@@ -95,6 +95,28 @@ button, input { font: inherit; }
 
 button { color: inherit; }
 button:disabled { cursor: not-allowed; opacity: .55; }
+.partner-page { min-height: 100svh; padding: clamp(24px, 5vw, 72px); background: radial-gradient(circle at 15% 0, #dbeeff, transparent 34%), #f4f7fb; }
+.partner-shell { width: min(1120px, 100%); margin: auto; }
+.partner-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+.partner-header h1, .partner-card h1, .partner-card h2 { margin: 0; letter-spacing: -.04em; }
+.partner-header h1 { font-size: clamp(34px, 5vw, 54px); }
+.partner-card { padding: 28px; border: 1px solid var(--line); border-radius: 24px; background: var(--surface); box-shadow: 0 20px 60px rgba(29,59,96,.08); }
+.partner-login { width: min(460px, 100%); margin: 6svh auto 0; display: grid; gap: 16px; }
+.partner-login label { display: grid; gap: 8px; font-size: 13px; font-weight: 750; }
+.partner-login input, .partner-directory textarea { width: 100%; border: 1px solid var(--line); border-radius: 14px; outline: none; background: white; color: var(--ink); }
+.partner-login input { height: 52px; padding: 0 15px; }
+.partner-directory textarea { min-height: 260px; padding: 15px; resize: vertical; line-height: 1.5; }
+.partner-login button, .partner-card > button { min-height: 48px; padding: 0 18px; border: 0; border-radius: 14px; color: white; background: var(--blue); font-weight: 800; cursor: pointer; }
+.partner-mark { width: 64px; height: 64px; display: grid; place-items: center; border-radius: 19px; color: white; background: linear-gradient(145deg,#0754cf,#11b9f3); font-size: 36px; font-weight: 900; box-shadow: 0 14px 32px rgba(13,105,222,.25); }
+.partner-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 18px; }
+.partner-directory { grid-column: 1 / -1; display: grid; gap: 14px; }
+.partner-code { margin: 20px 0; padding: 18px; border: 1px dashed #98bee9; border-radius: 16px; color: #075ec9; background: #eef7ff; font-size: 26px; font-weight: 900; letter-spacing: .08em; text-align: center; }
+.partner-card dl { display: grid; grid-template-columns: 120px 1fr; gap: 12px; margin: 22px 0; }
+.partner-card dt { color: var(--muted); }
+.partner-card dd { margin: 0; font-weight: 800; }
+.partner-secondary { min-height: 42px; padding: 0 16px; border: 1px solid var(--line); border-radius: 13px; background: white; cursor: pointer; }
+.partner-success { color: #138c59; font-weight: 750; }
+@media (max-width: 720px) { .partner-page { padding: 20px; } .partner-grid { grid-template-columns: 1fr; } .partner-directory { grid-column: auto; } .partner-header { align-items: flex-start; } }
 .app-loading { min-height: 100svh; display: grid; place-items: center; background: radial-gradient(circle, #e6f3ff, #f5f7fb 58%); }
 .app-loading img { border-radius: 24px; animation: app-pulse 1.5s ease-in-out infinite; box-shadow: 0 18px 50px rgba(15, 95, 214, .2); }
 @keyframes app-pulse { 50% { transform: scale(.96); opacity: .72; } }

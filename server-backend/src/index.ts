@@ -1,4 +1,12 @@
-import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  randomBytes,
+  randomUUID,
+  scrypt,
+  timingSafeEqual,
+} from "node:crypto";
 import Fastify, {
   type FastifyReply,
   type FastifyRequest,
@@ -27,6 +35,12 @@ const envSchema = z.object({
   FREEPBX_API_KEY: z.preprocess(
     (value) => value === "" ? undefined : value,
     z.string().min(32).optional(),
+  ),
+  DEFAULT_SIP_HOST: z.string().min(1).default("185.177.2.115"),
+  DEFAULT_SIP_PORT: z.coerce.number().int().min(1).max(65535).default(5060),
+  TENANT_SECRETS_KEY: z.preprocess(
+    (value) => value === "" ? undefined : value,
+    z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
   ),
   LIVEKIT_API_KEY: z.preprocess(
     (value) => value === "" ? undefined : value,
@@ -89,6 +103,8 @@ const liveKitRooms = env.LIVEKIT_WS_URL
 
 type AuthUser = {
   id: string;
+  tenantId: string;
+  tenantCode: string;
   sipNumber: string;
   displayName: string;
 };
@@ -113,6 +129,55 @@ await app.register(multipart, {
   limits: { files: 1, fileSize: 20 * 1024 * 1024, fields: 0 },
 });
 await mkdir(env.ATTACHMENT_DIR, { recursive: true });
+
+const DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000001";
+
+async function ensureTenantSchema(): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tenants (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      code VARCHAR(40) NOT NULL UNIQUE,
+      slug VARCHAR(80) NOT NULL UNIQUE,
+      name VARCHAR(120) NOT NULL,
+      logo_url TEXT,
+      primary_color VARCHAR(9) NOT NULL DEFAULT '#0A84FF',
+      sip_host VARCHAR(255) NOT NULL,
+      sip_port INTEGER NOT NULL DEFAULT 5060 CHECK (sip_port BETWEEN 1 AND 65535),
+      sip_transport VARCHAR(8) NOT NULL DEFAULT 'udp' CHECK (sip_transport IN ('udp','tcp','tls')),
+      outbound_proxy VARCHAR(255),
+      auth_type VARCHAR(16) NOT NULL CHECK (auth_type IN ('freepbx','webhook','local')),
+      auth_url TEXT,
+      auth_secret_encrypted TEXT,
+      partner_key_hash CHAR(64),
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    INSERT INTO tenants (
+      id, code, slug, name, sip_host, sip_port, sip_transport, auth_type
+    ) VALUES (
+      '${DEFAULT_TENANT_ID}', 'TOJIKTELECOM', 'tojiktelecom', 'Tojiktelecom',
+      '${env.DEFAULT_SIP_HOST.replaceAll("'", "''")}', ${env.DEFAULT_SIP_PORT}, 'udp', 'freepbx'
+    ) ON CONFLICT (id) DO UPDATE SET
+      sip_host = EXCLUDED.sip_host,
+      sip_port = EXCLUDED.sip_port;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id);
+    UPDATE users SET tenant_id = '${DEFAULT_TENANT_ID}' WHERE tenant_id IS NULL;
+    ALTER TABLE users ALTER COLUMN tenant_id SET NOT NULL;
+    ALTER TABLE users ALTER COLUMN tenant_id SET DEFAULT '${DEFAULT_TENANT_ID}';
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_sip_number_key;
+    CREATE UNIQUE INDEX IF NOT EXISTS users_tenant_sip_number_idx
+      ON users (tenant_id, sip_number);
+    CREATE INDEX IF NOT EXISTS users_tenant_active_idx
+      ON users (tenant_id, is_active);
+    ALTER TABLE conversations ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id);
+    UPDATE conversations SET tenant_id = '${DEFAULT_TENANT_ID}' WHERE tenant_id IS NULL;
+    ALTER TABLE conversations ALTER COLUMN tenant_id SET NOT NULL;
+    ALTER TABLE conversations ALTER COLUMN tenant_id SET DEFAULT '${DEFAULT_TENANT_ID}';
+  `);
+}
+
+await ensureTenantSchema();
 
 async function ensureAttachmentSchema(): Promise<void> {
   await pool.query(`
@@ -171,6 +236,90 @@ async function ensureConferenceSchema(): Promise<void> {
 }
 
 await ensureConferenceSchema();
+
+type TenantRow = {
+  id: string;
+  code: string;
+  slug: string;
+  name: string;
+  logo_url: string | null;
+  primary_color: string;
+  sip_host: string;
+  sip_port: number;
+  sip_transport: "udp" | "tcp" | "tls";
+  outbound_proxy: string | null;
+  auth_type: "freepbx" | "webhook" | "local";
+  auth_url: string | null;
+  auth_secret_encrypted: string | null;
+  partner_key_hash: string | null;
+  is_active: boolean;
+};
+
+function companyPayload(tenant: TenantRow) {
+  return {
+    id: tenant.id,
+    code: tenant.code,
+    name: tenant.name,
+    logoUrl: tenant.logo_url,
+    primaryColor: tenant.primary_color,
+    sip: {
+      host: tenant.sip_host,
+      port: tenant.sip_port,
+      transport: tenant.sip_transport,
+      outboundProxy: tenant.outbound_proxy,
+    },
+  };
+}
+
+async function findTenant(code: string): Promise<TenantRow | null> {
+  const result = await pool.query<TenantRow>(
+    `SELECT id, code, slug, name, logo_url, primary_color,
+            sip_host, sip_port, sip_transport, outbound_proxy,
+            auth_type, auth_url, auth_secret_encrypted,
+            partner_key_hash, is_active
+     FROM tenants WHERE code = $1`,
+    [code.trim().toUpperCase()],
+  );
+  return result.rows[0] ?? null;
+}
+
+function encryptTenantSecret(secret: string): string {
+  if (!env.TENANT_SECRETS_KEY) {
+    throw new Error("TENANT_SECRETS_KEY is required for webhook tenants");
+  }
+  const iv = randomBytes(12);
+  const cipher = createCipheriv(
+    "aes-256-gcm",
+    Buffer.from(env.TENANT_SECRETS_KEY, "hex"),
+    iv,
+  );
+  const encrypted = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
+  return [iv, cipher.getAuthTag(), encrypted]
+    .map((value) => value.toString("base64url"))
+    .join(".");
+}
+
+function decryptTenantSecret(encoded: string): string {
+  if (!env.TENANT_SECRETS_KEY) {
+    throw new Error("TENANT_SECRETS_KEY is required for webhook tenants");
+  }
+  const [ivText, tagText, encryptedText] = encoded.split(".");
+  if (!ivText || !tagText || !encryptedText) throw new Error("Invalid tenant secret");
+  const decipher = createDecipheriv(
+    "aes-256-gcm",
+    Buffer.from(env.TENANT_SECRETS_KEY, "hex"),
+    Buffer.from(ivText, "base64url"),
+  );
+  decipher.setAuthTag(Buffer.from(tagText, "base64url"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(encryptedText, "base64url")),
+    decipher.final(),
+  ]).toString("utf8");
+}
+
+function opaqueKeyHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 function safeEqual(left: string, right: string): boolean {
   const a = Buffer.from(left);
@@ -238,6 +387,8 @@ async function verifyPassword(
 
 async function issueToken(user: AuthUser): Promise<string> {
   return new SignJWT({
+    tenantId: user.tenantId,
+    tenantCode: user.tenantCode,
     sipNumber: user.sipNumber,
     displayName: user.displayName,
   })
@@ -262,6 +413,12 @@ async function tokenUser(token: string): Promise<AuthUser | null> {
     }
     return {
       id: payload.sub,
+      tenantId: typeof payload.tenantId === "string"
+        ? payload.tenantId
+        : DEFAULT_TENANT_ID,
+      tenantCode: typeof payload.tenantCode === "string"
+        ? payload.tenantCode
+        : "TOJIKTELECOM",
       sipNumber: payload.sipNumber,
       displayName: payload.displayName,
     };
@@ -334,7 +491,7 @@ function liveKitConfigured(): boolean {
 async function issueVideoToken(user: AuthUser, room: string): Promise<string> {
   if (!liveKitConfigured()) throw new Error("LiveKit is not configured");
   const token = new AccessToken(env.LIVEKIT_API_KEY!, env.LIVEKIT_API_SECRET!, {
-    identity: user.sipNumber,
+    identity: `${user.tenantId}:${user.sipNumber}`,
     name: user.displayName,
     ttl: "10m",
   });
@@ -371,9 +528,19 @@ app.get("/health", async (_request, reply) => {
   return reply.send({
     status: "ok",
     service: "tvoice-chat",
-    version: "0.5.1",
+    version: "0.6.0",
     video: liveKitConfigured() ? "ready" : "disabled",
   });
+});
+
+app.get("/v1/tenants/:code", async (request, reply) => {
+  const parsed = z.string().trim().min(2).max(40).regex(/^[A-Za-z0-9_-]+$/)
+    .safeParse((request.params as { code?: string }).code);
+  if (!parsed.success) return reply.code(400).send({ error: "invalid_request" });
+  const tenant = await findTenant(parsed.data);
+  if (!tenant) return reply.code(404).send({ error: "tenant_not_found" });
+  if (!tenant.is_active) return reply.code(403).send({ error: "tenant_inactive" });
+  return reply.send({ company: companyPayload(tenant) });
 });
 
 const freePbxUserSchema = z.object({
@@ -411,6 +578,7 @@ async function freePbxRequest(
 }
 
 async function authenticateWithFreePbx(
+  tenant: TenantRow,
   sipNumber: string,
   password: string,
 ): Promise<AuthUser | null> {
@@ -429,18 +597,72 @@ async function authenticateWithFreePbx(
     display_name: string;
   }>(
     `INSERT INTO users
-       (sip_number, display_name, password_hash, is_active, auth_source)
-     VALUES ($1, $2, 'external$freepbx', TRUE, 'freepbx')
-     ON CONFLICT (sip_number) DO UPDATE SET
+       (tenant_id, sip_number, display_name, password_hash, is_active, auth_source)
+     VALUES ($1, $2, $3, 'external$freepbx', TRUE, 'freepbx')
+     ON CONFLICT (tenant_id, sip_number) DO UPDATE SET
        display_name = EXCLUDED.display_name,
        is_active = TRUE,
        auth_source = 'freepbx'
      RETURNING id, sip_number, display_name`,
-    [parsed.user.sipNumber, parsed.user.displayName],
+    [tenant.id, parsed.user.sipNumber, parsed.user.displayName],
   );
   const row = result.rows[0]!;
   return {
     id: row.id,
+    tenantId: tenant.id,
+    tenantCode: tenant.code,
+    sipNumber: row.sip_number,
+    displayName: row.display_name,
+  };
+}
+
+async function authenticateWithTenantWebhook(
+  tenant: TenantRow,
+  sipNumber: string,
+  password: string,
+): Promise<AuthUser | null> {
+  if (!tenant.auth_url || !tenant.auth_secret_encrypted) {
+    throw new Error(`Tenant ${tenant.code} has incomplete webhook configuration`);
+  }
+  const response = await fetch(tenant.auth_url, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "x-tvoice-key": decryptTenantSecret(tenant.auth_secret_encrypted),
+    },
+    body: JSON.stringify({
+      tenantCode: tenant.code,
+      sipNumber,
+      password,
+    }),
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (response.status === 401 || response.status === 403) return null;
+  if (!response.ok) {
+    throw new Error(`Tenant auth returned HTTP ${response.status}`);
+  }
+  const parsed = freePbxAuthResponseSchema.parse(await response.json());
+  const result = await pool.query<{
+    id: string;
+    sip_number: string;
+    display_name: string;
+  }>(
+    `INSERT INTO users
+       (tenant_id, sip_number, display_name, password_hash, is_active, auth_source)
+     VALUES ($1, $2, $3, 'external$webhook', TRUE, 'webhook')
+     ON CONFLICT (tenant_id, sip_number) DO UPDATE SET
+       display_name = EXCLUDED.display_name,
+       is_active = TRUE,
+       auth_source = 'webhook'
+     RETURNING id, sip_number, display_name`,
+    [tenant.id, parsed.user.sipNumber, parsed.user.displayName],
+  );
+  const row = result.rows[0]!;
+  return {
+    id: row.id,
+    tenantId: tenant.id,
+    tenantCode: tenant.code,
     sipNumber: row.sip_number,
     displayName: row.display_name,
   };
@@ -459,22 +681,22 @@ async function syncFreePbxDirectory(): Promise<number> {
     for (const user of users) {
       await client.query(
         `INSERT INTO users
-           (sip_number, display_name, password_hash, is_active, auth_source)
-         VALUES ($1, $2, 'external$freepbx', TRUE, 'freepbx')
-         ON CONFLICT (sip_number) DO UPDATE SET
+           (tenant_id, sip_number, display_name, password_hash, is_active, auth_source)
+         VALUES ($1, $2, $3, 'external$freepbx', TRUE, 'freepbx')
+         ON CONFLICT (tenant_id, sip_number) DO UPDATE SET
            display_name = EXCLUDED.display_name,
            is_active = TRUE,
            auth_source = 'freepbx'`,
-        [user.sipNumber, user.displayName],
+        [DEFAULT_TENANT_ID, user.sipNumber, user.displayName],
       );
     }
     const numbers = users.map((user) => user.sipNumber);
     await client.query(
       `UPDATE users
        SET is_active = FALSE
-       WHERE auth_source = 'freepbx'
-         AND NOT (sip_number = ANY($1::text[]))`,
-      [numbers],
+       WHERE tenant_id = $1 AND auth_source = 'freepbx'
+         AND NOT (sip_number = ANY($2::text[]))`,
+      [DEFAULT_TENANT_ID, numbers],
     );
     await client.query("COMMIT");
     return users.length;
@@ -487,6 +709,8 @@ async function syncFreePbxDirectory(): Promise<number> {
 }
 
 const loginSchema = z.object({
+  tenantCode: z.string().trim().min(2).max(40)
+    .regex(/^[A-Za-z0-9_-]+$/).default("TOJIKTELECOM"),
   sipNumber: z.string().trim().regex(/^[0-9*#+]{2,32}$/),
   password: z.string().min(1).max(256),
 });
@@ -504,9 +728,17 @@ app.post(
       return reply.code(400).send({ error: "invalid_request" });
     }
 
-    if (freePbxConfigured()) {
+    const tenant = await findTenant(parsed.data.tenantCode);
+    if (!tenant) return reply.code(404).send({ error: "tenant_not_found" });
+    if (!tenant.is_active) return reply.code(403).send({ error: "tenant_inactive" });
+
+    if (tenant.auth_type === "freepbx") {
+      if (!freePbxConfigured()) {
+        return reply.code(503).send({ error: "auth_provider_unavailable" });
+      }
       try {
         const user = await authenticateWithFreePbx(
+          tenant,
           parsed.data.sipNumber,
           parsed.data.password,
         );
@@ -521,9 +753,34 @@ app.post(
           tokenType: "Bearer",
           expiresIn: 2_592_000,
           user,
+          company: companyPayload(tenant),
         });
       } catch (error) {
         app.log.error({ err: error }, "FreePBX authentication provider failed");
+        return reply.code(503).send({ error: "auth_provider_unavailable" });
+      }
+    }
+
+    if (tenant.auth_type === "webhook") {
+      try {
+        const user = await authenticateWithTenantWebhook(
+          tenant,
+          parsed.data.sipNumber,
+          parsed.data.password,
+        );
+        if (!user) return reply.code(401).send({ error: "invalid_credentials" });
+        return reply.send({
+          accessToken: await issueToken(user),
+          tokenType: "Bearer",
+          expiresIn: 2_592_000,
+          user,
+          company: companyPayload(tenant),
+        });
+      } catch (error) {
+        app.log.error(
+          { err: error, tenantCode: tenant.code },
+          "Tenant authentication provider failed",
+        );
         return reply.code(503).send({ error: "auth_provider_unavailable" });
       }
     }
@@ -537,8 +794,8 @@ app.post(
     }>(
       `SELECT id, sip_number, display_name, password_hash, is_active
        FROM users
-       WHERE sip_number = $1`,
-      [parsed.data.sipNumber],
+       WHERE tenant_id = $1 AND sip_number = $2`,
+      [tenant.id, parsed.data.sipNumber],
     );
     const row = result.rows[0];
     if (
@@ -551,6 +808,8 @@ app.post(
 
     const user: AuthUser = {
       id: row.id,
+      tenantId: tenant.id,
+      tenantCode: tenant.code,
       sipNumber: row.sip_number,
       displayName: row.display_name,
     };
@@ -559,16 +818,170 @@ app.post(
       tokenType: "Bearer",
       expiresIn: 2_592_000,
       user,
+      company: companyPayload(tenant),
     });
   },
 );
 
 const adminUserSchema = z.object({
+  tenantCode: z.string().trim().min(2).max(40)
+    .regex(/^[A-Za-z0-9_-]+$/).default("TOJIKTELECOM"),
   sipNumber: z.string().trim().regex(/^[0-9*#+]{2,32}$/),
   displayName: z.string().trim().min(1).max(120),
   password: z.string().min(1).max(256),
   isActive: z.boolean().default(true),
 });
+
+const tenantCreateSchema = z.object({
+  code: z.string().trim().min(2).max(40).regex(/^[A-Za-z0-9_-]+$/),
+  slug: z.string().trim().min(2).max(80).regex(/^[a-z0-9-]+$/),
+  name: z.string().trim().min(2).max(120),
+  logoUrl: z.string().url().optional(),
+  primaryColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/).default("#0A84FF"),
+  sip: z.object({
+    host: z.string().trim().min(1).max(255),
+    port: z.number().int().min(1).max(65535).default(5060),
+    transport: z.enum(["udp", "tcp", "tls"]).default("udp"),
+    outboundProxy: z.string().trim().max(255).optional(),
+  }),
+  auth: z.discriminatedUnion("type", [
+    z.object({ type: z.literal("local") }),
+    z.object({
+      type: z.literal("webhook"),
+      url: z.string().url(),
+      sharedSecret: z.string().min(32).max(512),
+    }),
+  ]),
+});
+
+app.post(
+  "/v1/admin/tenants",
+  { preHandler: requireAdmin, config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+  async (request, reply) => {
+    const parsed = tenantCreateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "invalid_request", details: parsed.error.flatten() });
+    }
+    const data = parsed.data;
+    const partnerKey = randomBytes(32).toString("base64url");
+    const authSecret = data.auth.type === "webhook"
+      ? encryptTenantSecret(data.auth.sharedSecret)
+      : null;
+    const result = await pool.query<TenantRow>(
+      `INSERT INTO tenants (
+         code, slug, name, logo_url, primary_color,
+         sip_host, sip_port, sip_transport, outbound_proxy,
+         auth_type, auth_url, auth_secret_encrypted, partner_key_hash
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+       ) RETURNING *`,
+      [
+        data.code.toUpperCase(), data.slug, data.name, data.logoUrl ?? null,
+        data.primaryColor.toUpperCase(), data.sip.host, data.sip.port,
+        data.sip.transport, data.sip.outboundProxy ?? null, data.auth.type,
+        data.auth.type === "webhook" ? data.auth.url : null,
+        authSecret, opaqueKeyHash(partnerKey),
+      ],
+    );
+    return reply.code(201).send({
+      company: companyPayload(result.rows[0]!),
+      partnerKey,
+      warning: "Сохраните partnerKey сейчас: повторно он не отображается",
+    });
+  },
+);
+
+app.get(
+  "/v1/admin/tenants",
+  { preHandler: requireAdmin },
+  async (_request, reply) => {
+    const result = await pool.query<TenantRow>(
+      `SELECT * FROM tenants ORDER BY name, code`,
+    );
+    return reply.send({ companies: result.rows.map(companyPayload) });
+  },
+);
+
+async function partnerTenant(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<TenantRow | null> {
+  const code = request.headers["x-tenant-code"];
+  const key = request.headers["x-tenant-key"];
+  if (typeof code !== "string" || typeof key !== "string") {
+    reply.code(401).send({ error: "unauthorized" });
+    return null;
+  }
+  const tenant = await findTenant(code);
+  if (!tenant?.partner_key_hash || !safeEqual(tenant.partner_key_hash, opaqueKeyHash(key))) {
+    reply.code(401).send({ error: "unauthorized" });
+    return null;
+  }
+  if (!tenant.is_active) {
+    reply.code(403).send({ error: "tenant_inactive" });
+    return null;
+  }
+  return tenant;
+}
+
+app.get("/v1/partner/tenant", async (request, reply) => {
+  const tenant = await partnerTenant(request, reply);
+  if (!tenant) return;
+  return reply.send({ company: companyPayload(tenant) });
+});
+
+const partnerDirectorySchema = z.object({
+  users: z.array(z.object({
+    sipNumber: z.string().trim().regex(/^[0-9*#+]{2,32}$/),
+    displayName: z.string().trim().min(1).max(120),
+    isActive: z.boolean().default(true),
+  })).max(10_000),
+});
+
+app.put(
+  "/v1/partner/directory",
+  { config: { bodyLimit: 2 * 1024 * 1024, rateLimit: { max: 10, timeWindow: "1 minute" } } },
+  async (request, reply) => {
+    const tenant = await partnerTenant(request, reply);
+    if (!tenant) return;
+    const parsed = partnerDirectorySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "invalid_request", details: parsed.error.flatten() });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (const user of parsed.data.users) {
+        await client.query(
+          `INSERT INTO users (
+             tenant_id, sip_number, display_name, password_hash, auth_source, is_active
+           ) VALUES ($1, $2, $3, 'external$directory', 'partner', $4)
+           ON CONFLICT (tenant_id, sip_number) DO UPDATE SET
+             display_name = EXCLUDED.display_name,
+             is_active = EXCLUDED.is_active,
+             auth_source = 'partner'`,
+          [tenant.id, user.sipNumber, user.displayName, user.isActive],
+        );
+      }
+      const activeNumbers = parsed.data.users
+        .filter((user) => user.isActive)
+        .map((user) => user.sipNumber);
+      await client.query(
+        `UPDATE users SET is_active = FALSE
+         WHERE tenant_id = $1 AND auth_source = 'partner'
+           AND NOT (sip_number = ANY($2::text[]))`,
+        [tenant.id, activeNumbers],
+      );
+      await client.query("COMMIT");
+      return reply.send({ imported: parsed.data.users.length });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
+);
 
 app.post(
   "/v1/admin/users",
@@ -588,20 +1001,23 @@ app.post(
     }
 
     const passwordHash = await hashPassword(parsed.data.password);
+    const tenant = await findTenant(parsed.data.tenantCode);
+    if (!tenant) return reply.code(404).send({ error: "tenant_not_found" });
     const result = await pool.query<{
       id: string;
       sip_number: string;
       display_name: string;
       is_active: boolean;
     }>(
-      `INSERT INTO users (sip_number, display_name, password_hash, is_active)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (sip_number) DO UPDATE SET
+      `INSERT INTO users (tenant_id, sip_number, display_name, password_hash, is_active)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (tenant_id, sip_number) DO UPDATE SET
          display_name = EXCLUDED.display_name,
          password_hash = EXCLUDED.password_hash,
          is_active = EXCLUDED.is_active
        RETURNING id, sip_number, display_name, is_active`,
       [
+        tenant.id,
         parsed.data.sipNumber,
         parsed.data.displayName,
         passwordHash,
@@ -638,9 +1054,9 @@ app.get(
     }>(
       `SELECT id, sip_number, display_name
        FROM users
-       WHERE is_active = TRUE AND id <> $1
+       WHERE tenant_id = $2 AND is_active = TRUE AND id <> $1
        ORDER BY display_name, sip_number`,
-      [user.id],
+      [user.id, user.tenantId],
     );
     return reply.send({
       contacts: result.rows.map((row) => ({
@@ -675,8 +1091,8 @@ app.post(
       display_name: string;
     }>(
       `SELECT id, sip_number, display_name FROM users
-       WHERE sip_number = $1 AND is_active = TRUE`,
-      [parsed.data.peerSipNumber],
+       WHERE tenant_id = $2 AND sip_number = $1 AND is_active = TRUE`,
+      [parsed.data.peerSipNumber, caller.tenantId],
     );
     const row = result.rows[0];
     if (!row) return reply.code(404).send({ error: "contact_not_found" });
@@ -685,6 +1101,8 @@ app.post(
     }
     const callee: AuthUser = {
       id: row.id,
+      tenantId: caller.tenantId,
+      tenantCode: caller.tenantCode,
       sipNumber: row.sip_number,
       displayName: row.display_name,
     };
@@ -801,8 +1219,8 @@ app.post(
       }>(
         `SELECT id, sip_number, display_name
          FROM users
-         WHERE sip_number = $1 AND is_active = TRUE`,
-        [parsed.data.peerSipNumber],
+         WHERE tenant_id = $2 AND sip_number = $1 AND is_active = TRUE`,
+        [parsed.data.peerSipNumber, user.tenantId],
       );
       const peer = peerResult.rows[0];
       if (!peer) {
@@ -828,7 +1246,8 @@ app.post(
       let conversationId = existing.rows[0]?.conversation_id;
       if (!conversationId) {
         const conversation = await client.query<{ id: string }>(
-          "INSERT INTO conversations DEFAULT VALUES RETURNING id",
+          "INSERT INTO conversations (tenant_id) VALUES ($1) RETURNING id",
+          [user.tenantId],
         );
         conversationId = conversation.rows[0]!.id;
         await client.query(
